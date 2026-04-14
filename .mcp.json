@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "health-claw": {
+      "command": "node",
+      "args": ["PLACEHOLDER:SKILL_ROOT/scripts/mcp-server.js"],
+      "env": {
+        "HEALTH_CLAW_HTTP_PORT": "7926"
+      }
+    }
+  }
+}

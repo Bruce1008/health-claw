@@ -1,0 +1,12 @@
+# 设计文档（机密）
+health-claw-*.md
+health-claw-*.html
+
+# eval & archive
+eval/
+archive/
+
+# 系统文件
+.DS_Store
+.tmp-caddy/
+.claude/

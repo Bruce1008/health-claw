@@ -1,0 +1,1079 @@
+#!/usr/bin/env node
+"use strict";
+
+// ============================================================================
+// Health Claw — MCP Server v2
+// ============================================================================
+// 零外部依赖，只用 node 内置模块。
+// 三个接口：1) stdio MCP (NDJSON)  2) 本地 HTTP (:7926)  3) child_process.spawn
+// ============================================================================
+
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const http = require("http");
+const { spawn } = require("child_process");
+const os = require("os");
+
+// ─── 枚举常量（与 references/state-schema.md 同步，修改需双向同步）──────────
+const USER_STATE_STATUS_ENUM = ["available", "sick", "injured", "busy", "traveling", "low_motivation"];
+const LAST_SCENE_STATUS_ENUM = ["done", "blocked", "needs_context", "error", "skipped"];
+const INJURY_STATUS_ENUM = ["active", "recovered", "chronic"];
+const FITNESS_LEVEL_ENUM = ["beginner", "intermediate", "advanced"];
+const INTENSITY_ENUM = ["high", "medium", "low"];
+const SESSION_MODE_ENUM = ["set-rest", "continuous", "interval", "flow", "timer", "passive"];
+const SOURCE_ENUM = ["planned", "user_initiated"];
+const FATIGUE_ENUM = ["low", "moderate", "high"];
+const REPORT_TYPE_ENUM = ["readiness_assessment", "training_plan", "post_session", "daily_report", "weekly", "monthly"];
+const HEALTH_LOG_EVENT_TYPES = ["scene_end", "session", "body_data", "signal", "status_change", "rest_day", "profile_update"];
+
+// ─── Mock 数据（eval 脚本通过正则替换这些常量）─────────────────────────────
+const TODAY = "2026-04-12";
+const healthSummary = { sleep: { total_min: 465, deep_min: 102, rem_min: 88, score: 82 }, hrv: { latest: 48, avg_7d: 52, trend: "falling" }, resting_hr: { latest: 58, avg_7d: 56 } };
+const sessions = [{ date: "2026-04-11", type: "力量训练", session_mode: "set-rest", intensity: "high", duration_min: 55, calories: 420, source: "planned", summary: "胸+三头" }, { date: "2026-04-10", type: "有氧", session_mode: "continuous", intensity: "medium", duration_min: 30, calories: 280, source: "planned", summary: "5km 跑步" }];
+
+// ─── 路径 ──────────────────────────────────────────────────────────────────
+function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
+
+const DATA_ROOT = process.env.HEALTH_CLAW_DATA_ROOT || path.join(os.homedir(), "Library", "Application Support", "health-claw");
+const CONTEXT_DIR = path.join(DATA_ROOT, "context");
+const LOGS_DIR = path.join(DATA_ROOT, "logs");
+const MEMORY_DIR = path.join(DATA_ROOT, "memory");
+const STATE_PATH = path.join(CONTEXT_DIR, "state.json");
+const STATE_BAK_PATH = path.join(CONTEXT_DIR, "state.json.bak");
+const HEALTH_LOG_PATH = path.join(CONTEXT_DIR, "health-log.jsonl");
+const MEMORY_FILE = path.join(DATA_ROOT, "MEMORY.md");
+
+ensureDir(CONTEXT_DIR);
+ensureDir(LOGS_DIR);
+ensureDir(MEMORY_DIR);
+
+// ─── 日期工具 ──────────────────────────────────────────────────────────────
+function today() { return TODAY; }
+function nowISO() { return new Date().toISOString(); }
+function daysBetween(a, b) { return Math.floor((new Date(b) - new Date(a)) / 86400000); }
+
+// ─── 文件读写（原子写入：先 .tmp 再 rename）──────────────────────────────
+function readJSON(p) {
+  if (!fs.existsSync(p)) return null;
+  return JSON.parse(fs.readFileSync(p, "utf8"));
+}
+
+function writeJSON(p, obj) {
+  const tmp = p + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n");
+  fs.renameSync(tmp, p);
+}
+
+function appendLine(p, line) {
+  ensureDir(path.dirname(p));
+  fs.appendFileSync(p, line + "\n");
+}
+
+// ─── State 读写 ────────────────────────────────────────────────────────────
+function readState() {
+  const state = readJSON(STATE_PATH) || {
+    user_state: { status: "available", since: today(), next_check: null },
+    profile: null,
+    training_state: {
+      consecutive_training_days: 0,
+      consecutive_rest_days: 0,
+      recent_sessions: [],
+      fatigue_estimate: "low",
+      pending_adjustments: []
+    },
+    last_scene: null,
+    signals: { body: [], schedule: [], motivation: [] }
+  };
+  return state;
+}
+
+function buildReminders(state) {
+  const reminders = [];
+  const prof = state.profile;
+  if (prof && Array.isArray(prof.injuries)) {
+    for (const inj of prof.injuries) {
+      if (inj.status === "active" && inj.reported_at) {
+        const d = daysBetween(inj.reported_at, today());
+        if (d >= 14) {
+          reminders.push({ type: "injury_check", description: inj.description, days_since: d });
+        }
+      }
+    }
+  }
+  if (prof && prof._meta) {
+    const fields = [];
+    if (prof._meta.goal_updated_at && daysBetween(prof._meta.goal_updated_at, today()) >= 30) fields.push("goal");
+    if (prof._meta.fitness_level_updated_at && daysBetween(prof._meta.fitness_level_updated_at, today()) >= 30) fields.push("fitness_level");
+    if (fields.length > 0) reminders.push({ type: "profile_review", fields });
+  }
+  return reminders;
+}
+
+function cleanExpiredSignals(signals) {
+  const cutoff72h = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
+  const cleaned = {};
+  for (const cat of ["body", "motivation"]) {
+    cleaned[cat] = (signals[cat] || []).filter(s => s.ts && s.ts >= cutoff72h);
+  }
+  // schedule 按日期自身过期
+  cleaned.schedule = (signals.schedule || []).filter(s => {
+    if (s.ts) return s.ts >= cutoff72h;
+    return true;
+  });
+  return cleaned;
+}
+
+// ─── 深度合并 ──────────────────────────────────────────────────────────────
+function deepMerge(target, source) {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    const sv = source[key];
+    const tv = target[key];
+    if (Array.isArray(sv)) {
+      result[key] = sv; // 数组整体替换
+    } else if (sv && typeof sv === "object" && !Array.isArray(sv) && tv && typeof tv === "object" && !Array.isArray(tv)) {
+      result[key] = deepMerge(tv, sv);
+    } else {
+      result[key] = sv;
+    }
+  }
+  return result;
+}
+
+// ─── alert_hr 自动计算 ─────────────────────────────────────────────────────
+function computeAlertHR(profile) {
+  let maxHR = 190; // 最保守回退
+  if (profile.max_hr_measured && typeof profile.max_hr_measured === "number") {
+    maxHR = profile.max_hr_measured;
+  } else if (profile.basic_info && typeof profile.basic_info.age === "number") {
+    maxHR = 220 - profile.basic_info.age;
+  }
+  return { critical: Math.round(maxHR * 0.95), warning: Math.round(maxHR * 0.90) };
+}
+
+// ─── 工具调用日志 ──────────────────────────────────────────────────────────
+function logToolCall(tool, payload) {
+  const logFile = path.join(LOGS_DIR, `${today()}.tool-calls.jsonl`);
+  const entry = JSON.stringify({ timestamp: nowISO(), tool, payload });
+  appendLine(logFile, entry);
+}
+
+// ─── session 内工具调用记录（检查 7 天上下文）──────────────────────────────
+const sessionToolsCalled = new Set();
+
+// ─── SSE 客户端管理 ────────────────────────────────────────────────────────
+const sseClients = [];
+
+function pushSSE(tool, args) {
+  const data = JSON.stringify({ tool, args });
+  for (const res of sseClients) {
+    try { res.write(`event: tool_call\ndata: ${data}\n\n`); } catch (_) { /* ignore broken connections */ }
+  }
+}
+
+// ─── request_user_input 回调管理 ───────────────────────────────────────────
+const pendingCallbacks = new Map(); // request_id → { resolve, timer }
+
+function waitForCallback(requestId, timeoutMs = 300000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingCallbacks.delete(requestId);
+      reject(new Error("request_user_input timeout"));
+    }, timeoutMs);
+    pendingCallbacks.set(requestId, { resolve, timer });
+  });
+}
+
+function resolveCallback(requestId, response) {
+  const entry = pendingCallbacks.get(requestId);
+  if (!entry) return false;
+  clearTimeout(entry.timer);
+  pendingCallbacks.delete(requestId);
+  entry.resolve(response);
+  return true;
+}
+
+// ─── 工具 schema 定义 ──────────────────────────────────────────────────────
+const TOOLS = [
+  // ── 本地文件工具 (1-8) ──
+  {
+    name: "read_state",
+    description: "读取 state.json 完整内容（附带时效性提醒 reminders）",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "get_user_profile",
+    description: "读取 state.json → profile（read_state 的快捷方式）",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "update_state",
+    description: "局部更新 state.json（深度合并 + 枚举校验 + 备份 + alert_hr 自动重算 + profile 变更自动记日志）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        patch: { type: "object", description: "要合并的字段" }
+      },
+      required: ["patch"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "write_daily_log",
+    description: "追加 markdown 到当天日志 logs/{date}.md",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "Markdown 内容" },
+        date: { type: "string", description: "YYYY-MM-DD，默认今天" }
+      },
+      required: ["content"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "append_health_log",
+    description: "追加 JSON 事件到 health-log.jsonl（永不覆写）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        event: {
+          type: "object",
+          description: "事件对象，需含 type/date/ts",
+          properties: {
+            type: { type: "string", enum: HEALTH_LOG_EVENT_TYPES },
+            date: { type: "string" },
+            ts: { type: "string" }
+          },
+          required: ["type", "date", "ts"]
+        }
+      },
+      required: ["event"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "write_global_memory",
+    description: "写入全局记忆（daily → memory/{date}.md，milestone → MEMORY.md）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "Markdown 内容" },
+        date: { type: "string", description: "YYYY-MM-DD，默认今天" },
+        target: { type: "string", enum: ["daily", "milestone"], description: "写入目标，默认 daily" }
+      },
+      required: ["content"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_workout_log",
+    description: "查询本地训练记录（按日期/类型/最近 N 条）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter_type: { type: "string", enum: ["by_date", "by_type", "recent"], description: "过滤模式" },
+        date: { type: "string", description: "用于 by_date 过滤" },
+        type: { type: "string", description: "用于 by_type 过滤" },
+        limit: { type: "number", description: "用于 recent 过滤的条数限制，默认 10" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "set_body_data",
+    description: "记录体重/体脂到本地",
+    inputSchema: {
+      type: "object",
+      properties: {
+        weight: { type: "number", description: "体重 kg" },
+        body_fat: { type: "number", description: "体脂百分比" },
+        date: { type: "string", description: "YYYY-MM-DD，默认今天" }
+      },
+      additionalProperties: false
+    }
+  },
+
+  // ── 设备通信工具 (9-18) ──
+  {
+    name: "get_health_summary",
+    description: "通过 App 桥从 HealthKit 拉取睡眠、HRV、静息心率",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "YYYY-MM-DD" },
+        end_date: { type: "string", description: "YYYY-MM-DD" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_session_live",
+    description: "查询当前 session 的实时数据（心率、时长、消耗）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "默认 current" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "set_workout_plan",
+    description: "下发训练计划到 Watch（含 session 模式）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        plan: { type: "object", description: "训练计划内容" },
+        session_mode: { type: "string", enum: SESSION_MODE_ENUM },
+        date: { type: "string", description: "YYYY-MM-DD，默认今天" }
+      },
+      required: ["plan", "session_mode"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "set_alert_rules",
+    description: "下发 Watch 心率告警规则（引用 profile.alert_hr）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rules: {
+          type: "array",
+          description: "告警规则数组",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              condition: { type: "string" },
+              level: { type: "string", enum: ["critical", "warning", "info"] },
+              local_only: { type: "boolean" }
+            },
+            required: ["id", "condition", "level"]
+          }
+        }
+      },
+      required: ["rules"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "control_session",
+    description: "session 控制（start/pause/resume/stop）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["start", "pause", "resume", "stop", "update"] },
+        session_mode: { type: "string", enum: SESSION_MODE_ENUM },
+        source: { type: "string", enum: SOURCE_ENUM },
+        session_id: { type: "string" }
+      },
+      required: ["action"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "send_notification",
+    description: "推送通知到手机/手表",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        body: { type: "string" },
+        type: { type: "string" },
+        target: { type: "string", enum: ["phone", "watch", "both"] }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "start_health_monitoring",
+    description: "触发 Watch 被动数据采集",
+    inputSchema: {
+      type: "object",
+      properties: {
+        metrics: { type: "array", items: { type: "string" } },
+        interval_seconds: { type: "number" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "show_report",
+    description: "展示结构化报告到 iPhone（同时写入 logs/{date}.show_report.json）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        report_type: { type: "string", enum: REPORT_TYPE_ENUM },
+        data: { type: "object", description: "报告数据，结构因 report_type 而异" }
+      },
+      required: ["report_type", "data"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "show_countdown",
+    description: "在 Watch 上展示倒计时（支持 actions 按钮）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        seconds: { type: "number" },
+        label: { type: "string" },
+        actions: { type: "array", items: { type: "string" } }
+      },
+      required: ["seconds"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "request_user_input",
+    description: "请求用户在 iPhone 或 Watch 上选择/输入",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: { type: "string" },
+        prompt: { type: "string" },
+        input_type: { type: "string", enum: ["confirm", "select", "number", "text"] },
+        options: { type: "array", items: { type: "string" } },
+        target: { type: "string", enum: ["phone", "watch"] }
+      },
+      required: ["prompt"],
+      additionalProperties: false
+    }
+  },
+
+  // ── 调度工具 (19-21) ──
+  {
+    name: "schedule_recurring",
+    description: "创建周期性 cron job（日报/周报/月报/定时提醒）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "唯一 job 名" },
+        cron: { type: "string", description: "5/6 字段 cron 表达式" },
+        prompt: { type: "string", description: "触发时注入的 prompt" },
+        tz: { type: "string", description: "时区，默认系统时区" }
+      },
+      required: ["name", "cron", "prompt"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "schedule_one_shot",
+    description: "创建一次性延迟 job",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delay: { type: "string", description: "延迟时间，如 30m / 2h / ISO 8601 绝对时间" },
+        prompt: { type: "string", description: "触发时注入的 prompt" },
+        name: { type: "string", description: "可选 job 名，不传自动生成" }
+      },
+      required: ["delay", "prompt"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "cancel_scheduled",
+    description: "按 name 删除已注册的 cron job",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "要删除的 job 名" }
+      },
+      required: ["name"],
+      additionalProperties: false
+    }
+  }
+];
+
+// ─── 工具 handler 实现 ─────────────────────────────────────────────────────
+const handlers = {};
+
+// #1 read_state
+handlers.read_state = (_args) => {
+  sessionToolsCalled.add("read_state");
+  const state = readState();
+  // 清理过期信号
+  if (state.signals) state.signals = cleanExpiredSignals(state.signals);
+  const reminders = buildReminders(state);
+  const result = { ok: true, state };
+  if (reminders.length > 0) result.reminders = reminders;
+  return result;
+};
+
+// #2 get_user_profile
+handlers.get_user_profile = (_args) => {
+  const state = readState();
+  return { ok: true, profile: state.profile };
+};
+
+// #3 update_state
+handlers.update_state = (args) => {
+  const { patch } = args;
+  if (!patch || typeof patch !== "object") return { error: "patch 参数必须是对象" };
+
+  // 枚举校验
+  if (patch.user_state && patch.user_state.status) {
+    if (!USER_STATE_STATUS_ENUM.includes(patch.user_state.status)) {
+      return { error: `user_state.status 不合法: ${patch.user_state.status}，允许值: ${USER_STATE_STATUS_ENUM.join("/")}` };
+    }
+  }
+  if (patch.last_scene && patch.last_scene.status) {
+    if (!LAST_SCENE_STATUS_ENUM.includes(patch.last_scene.status)) {
+      return { error: `last_scene.status 不合法: ${patch.last_scene.status}，允许值: ${LAST_SCENE_STATUS_ENUM.join("/")}` };
+    }
+  }
+  if (patch.training_state && patch.training_state.fatigue_estimate) {
+    if (!FATIGUE_ENUM.includes(patch.training_state.fatigue_estimate)) {
+      return { error: `fatigue_estimate 不合法: ${patch.training_state.fatigue_estimate}` };
+    }
+  }
+  if (patch.profile && Array.isArray(patch.profile.injuries)) {
+    for (const inj of patch.profile.injuries) {
+      if (inj.status && !INJURY_STATUS_ENUM.includes(inj.status)) {
+        return { error: `injury status 不合法: ${inj.status}` };
+      }
+    }
+  }
+  if (patch.profile && patch.profile.fitness_level) {
+    if (!FITNESS_LEVEL_ENUM.includes(patch.profile.fitness_level)) {
+      return { error: `fitness_level 不合法: ${patch.profile.fitness_level}` };
+    }
+  }
+
+  // 读取当前 state
+  const current = readState();
+
+  // 备份
+  if (fs.existsSync(STATE_PATH)) {
+    fs.copyFileSync(STATE_PATH, STATE_BAK_PATH);
+  }
+
+  // 检测 profile 变更（在合并前记录旧值）
+  const oldProfile = current.profile ? JSON.parse(JSON.stringify(current.profile)) : null;
+
+  // 深度合并
+  const merged = deepMerge(current, patch);
+
+  // alert_hr 自动重算
+  if (merged.profile) {
+    const needRecalc =
+      (patch.profile && patch.profile.max_hr_measured !== undefined) ||
+      (patch.profile && patch.profile.basic_info && patch.profile.basic_info.age !== undefined);
+    if (needRecalc || !merged.profile.alert_hr) {
+      merged.profile.alert_hr = computeAlertHR(merged.profile);
+    }
+  }
+
+  // 写入
+  writeJSON(STATE_PATH, merged);
+
+  // profile 变更自动记日志
+  if (patch.profile) {
+    const changedFields = [];
+    if (!oldProfile) {
+      // 从 null → 有值：整个 profile 都是新的
+      changedFields.push(...Object.keys(patch.profile).filter(k => k !== "_meta" && k !== "alert_hr"));
+    } else {
+      function diffProfile(oldObj, newObj, prefix) {
+        const allKeys = new Set([...Object.keys(oldObj || {}), ...Object.keys(newObj || {})]);
+        for (const k of allKeys) {
+          const fp = prefix ? `${prefix}.${k}` : k;
+          const ov = oldObj ? oldObj[k] : undefined;
+          const nv = newObj ? newObj[k] : undefined;
+          if (JSON.stringify(ov) !== JSON.stringify(nv)) {
+            if (fp.startsWith("_meta") || fp.startsWith("alert_hr")) continue;
+            changedFields.push(fp);
+          }
+        }
+      }
+      diffProfile(oldProfile, merged.profile, "");
+    }
+    if (changedFields.length > 0) {
+      const event = {
+        type: "profile_update",
+        date: today(),
+        ts: nowISO(),
+        changed_fields: changedFields,
+        trigger: oldProfile ? "user_dialogue" : "onboarding"
+      };
+      appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
+    }
+  }
+
+  // 更新 profile _meta 时间戳
+  if (patch.profile) {
+    if (!merged.profile._meta) merged.profile._meta = {};
+    if (patch.profile.goal !== undefined) merged.profile._meta.goal_updated_at = today();
+    if (patch.profile.fitness_level !== undefined) merged.profile._meta.fitness_level_updated_at = today();
+    writeJSON(STATE_PATH, merged);
+  }
+
+  return { ok: true, state: merged };
+};
+
+// #4 write_daily_log
+handlers.write_daily_log = (args) => {
+  const d = args.date || today();
+  const logFile = path.join(LOGS_DIR, `${d}.md`);
+  appendLine(logFile, args.content);
+  return { ok: true, file: logFile };
+};
+
+// #5 append_health_log
+handlers.append_health_log = (args) => {
+  const { event } = args;
+  if (!event || !event.type) return { error: "event.type 必填" };
+  if (!HEALTH_LOG_EVENT_TYPES.includes(event.type)) {
+    return { error: `event.type 不合法: ${event.type}，允许值: ${HEALTH_LOG_EVENT_TYPES.join("/")}` };
+  }
+  if (!event.date) return { error: "event.date 必填" };
+  if (!event.ts) return { error: "event.ts 必填" };
+  appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
+  return { ok: true };
+};
+
+// #6 write_global_memory
+handlers.write_global_memory = (args) => {
+  const target = args.target || "daily";
+  const d = args.date || today();
+  let filePath;
+  if (target === "milestone") {
+    filePath = MEMORY_FILE;
+  } else {
+    filePath = path.join(MEMORY_DIR, `${d}.md`);
+  }
+  appendLine(filePath, args.content);
+  return { ok: true, file: filePath };
+};
+
+// #7 get_workout_log
+handlers.get_workout_log = (args) => {
+  sessionToolsCalled.add("get_workout_log");
+  let result = [...sessions]; // mock 数据
+  const ft = args.filter_type || "recent";
+  if (ft === "by_date" && args.date) {
+    result = result.filter(s => s.date === args.date);
+  } else if (ft === "by_type" && args.type) {
+    result = result.filter(s => s.type === args.type);
+  } else if (ft === "recent") {
+    const limit = args.limit || 10;
+    result = result.slice(0, limit);
+  }
+  return { ok: true, sessions: result, source: "mock" };
+};
+
+// #8 set_body_data
+handlers.set_body_data = (args) => {
+  const d = args.date || today();
+  const record = { date: d, weight: args.weight, body_fat: args.body_fat, ts: nowISO() };
+  const filePath = path.join(LOGS_DIR, `${d}.set_body_data.json`);
+  writeJSON(filePath, record);
+  // 同时追加 health-log
+  const event = { type: "body_data", date: d, ts: nowISO(), data: { weight_kg: args.weight, body_fat_pct: args.body_fat }, source: "user_input" };
+  appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
+  return { ok: true, record };
+};
+
+// #9 get_health_summary
+handlers.get_health_summary = (args) => {
+  // mock 实现——真实版通过 HTTP 桥从 HealthKit 拉取
+  return {
+    ok: true,
+    period: { start: args.start_date || today(), end: args.end_date || today() },
+    latest: healthSummary,
+    source: "mock"
+  };
+};
+
+// #10 get_session_live
+handlers.get_session_live = (_args) => {
+  // mock：无活跃 session
+  return { ok: true, active: false };
+};
+
+// #11 set_workout_plan
+handlers.set_workout_plan = (args) => {
+  // 护栏：onboarding 检查
+  const state = readState();
+  if (!state.profile || !state.profile.basic_info || !state.profile.basic_info.age) {
+    return { ok: false, error: "onboarding_incomplete", hint: "profile.basic_info.age 缺失，先完成 onboarding" };
+  }
+  // 护栏：7 天上下文检查
+  let warning;
+  if (!sessionToolsCalled.has("read_state") && !sessionToolsCalled.has("get_workout_log")) {
+    warning = "missing_recent_context";
+  }
+  const d = args.date || today();
+  const filePath = path.join(LOGS_DIR, `${d}.set_workout_plan.json`);
+  writeJSON(filePath, { plan: args.plan, session_mode: args.session_mode, ts: nowISO() });
+  pushSSE("set_workout_plan", args);
+  const result = { ok: true, file: filePath };
+  if (warning) result.warning = warning;
+  return result;
+};
+
+// #12 set_alert_rules
+handlers.set_alert_rules = (args) => {
+  // 护栏：确保 alert_hr 存在
+  const state = readState();
+  if (state.profile && !state.profile.alert_hr) {
+    state.profile.alert_hr = computeAlertHR(state.profile);
+    writeJSON(STATE_PATH, state);
+  }
+  const d = today();
+  const filePath = path.join(LOGS_DIR, `${d}.set_alert_rules.json`);
+  writeJSON(filePath, { rules: args.rules, ts: nowISO() });
+  pushSSE("set_alert_rules", args);
+  return { ok: true, file: filePath };
+};
+
+// #13 control_session
+handlers.control_session = (args) => {
+  pushSSE("control_session", args);
+  return { ok: true, action: args.action };
+};
+
+// #14 send_notification
+handlers.send_notification = (args) => {
+  pushSSE("send_notification", args);
+  return { ok: true, target: args.target || "phone" };
+};
+
+// #15 start_health_monitoring
+handlers.start_health_monitoring = (args) => {
+  pushSSE("start_health_monitoring", args);
+  return { ok: true };
+};
+
+// #16 show_report
+handlers.show_report = (args) => {
+  if (!REPORT_TYPE_ENUM.includes(args.report_type)) {
+    return { error: `report_type 不合法: ${args.report_type}` };
+  }
+  const d = today();
+  const filePath = path.join(LOGS_DIR, `${d}.show_report.json`);
+  // 追加写入（一天可能多次 show_report）
+  appendLine(filePath, JSON.stringify({ report_type: args.report_type, data: args.data, ts: nowISO() }));
+  pushSSE("show_report", args);
+  return { ok: true, report_type: args.report_type };
+};
+
+// #17 show_countdown
+handlers.show_countdown = (args) => {
+  pushSSE("show_countdown", args);
+  return { ok: true };
+};
+
+// #18 request_user_input
+handlers.request_user_input = async (args) => {
+  const requestId = args.request_id || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const payload = { ...args, request_id: requestId };
+  pushSSE("request_user_input", payload);
+  try {
+    const response = await waitForCallback(requestId);
+    return { ok: true, request_id: requestId, response };
+  } catch (e) {
+    return { ok: false, error: e.message, request_id: requestId };
+  }
+};
+
+// #19 schedule_recurring
+handlers.schedule_recurring = (args) => {
+  // cron 格式快速校验
+  if (!/^[\d*\/,\-]+(\s[\d*\/,\-]+){4,5}$/.test(args.cron.trim())) {
+    return { ok: false, error: "cron 表达式格式不合法" };
+  }
+  // prompt 自动补全前缀
+  let prompt = args.prompt;
+  if (!prompt.startsWith("请使用 skill:health-claw ")) {
+    prompt = "请使用 skill:health-claw " + prompt;
+  }
+  const tz = args.tz || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  return new Promise((resolve) => {
+    const proc = spawn("openclaw", [
+      "cron", "add",
+      "--name", args.name,
+      "--cron", args.cron,
+      "--tz", tz,
+      "--session", "main",
+      "--message", prompt
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        if (stderr.includes("already exists") || stderr.includes("name_exists")) {
+          resolve({ ok: false, error: "name_exists", detail: `job "${args.name}" 已存在，先 cancel_scheduled 再重建` });
+        } else {
+          resolve({ ok: false, error: stderr.trim() || `exit code ${code}` });
+        }
+      } else {
+        // 记日志
+        const event = { type: "scene_end", date: today(), ts: nowISO(), scene: "schedule_registered", status: "done", summary: `cron: ${args.name} = ${args.cron}` };
+        appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
+        resolve({ ok: true, name: args.name, cron: args.cron, tz });
+      }
+    });
+    proc.on("error", (err) => {
+      if (err.code === "ENOENT") {
+        resolve({ ok: false, error: "openclaw_cli_not_found", hint: "openclaw 不在 PATH 中" });
+      } else {
+        resolve({ ok: false, error: err.message });
+      }
+    });
+  });
+};
+
+// #20 schedule_one_shot
+handlers.schedule_one_shot = (args) => {
+  const name = args.name || `oneshot_${Date.now()}`;
+  let prompt = args.prompt;
+  if (!prompt.startsWith("请使用 skill:health-claw ")) {
+    prompt = "请使用 skill:health-claw " + prompt;
+  }
+
+  return new Promise((resolve) => {
+    const proc = spawn("openclaw", [
+      "cron", "add",
+      "--name", name,
+      "--at", args.delay,
+      "--session", "main",
+      "--message", prompt
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        resolve({ ok: false, error: stderr.trim() || `exit code ${code}` });
+      } else {
+        resolve({ ok: true, name, delay: args.delay });
+      }
+    });
+    proc.on("error", (err) => {
+      resolve({ ok: false, error: err.code === "ENOENT" ? "openclaw_cli_not_found" : err.message });
+    });
+  });
+};
+
+// #21 cancel_scheduled
+handlers.cancel_scheduled = (args) => {
+  return new Promise((resolve) => {
+    const proc = spawn("openclaw", [
+      "cron", "remove",
+      "--name", args.name
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        if (stderr.includes("not found") || stderr.includes("not_found")) {
+          resolve({ ok: false, error: "not_found" });
+        } else {
+          resolve({ ok: false, error: stderr.trim() || `exit code ${code}` });
+        }
+      } else {
+        resolve({ ok: true });
+      }
+    });
+    proc.on("error", (err) => {
+      resolve({ ok: false, error: err.code === "ENOENT" ? "openclaw_cli_not_found" : err.message });
+    });
+  });
+};
+
+// ─── MCP stdio 主循环 (NDJSON) ─────────────────────────────────────────────
+function log(...args) { process.stderr.write(`[health-claw-mcp] ${args.join(" ")}\n`); }
+
+function send(msg) {
+  process.stdout.write(JSON.stringify(msg) + "\n");
+}
+
+function makeResult(content) {
+  return { content: [{ type: "text", text: typeof content === "string" ? content : JSON.stringify(content) }] };
+}
+
+function makeError(content) {
+  return { content: [{ type: "text", text: typeof content === "string" ? content : JSON.stringify(content) }], isError: true };
+}
+
+async function handleRequest(msg) {
+  const { id, method, params } = msg;
+
+  if (method === "initialize") {
+    send({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "health-claw-mcp-server", version: "2.0.0" }
+      }
+    });
+    return;
+  }
+
+  if (method === "notifications/initialized") {
+    // 通知不需要回复
+    return;
+  }
+
+  if (method === "tools/list") {
+    send({
+      jsonrpc: "2.0",
+      id,
+      result: { tools: TOOLS }
+    });
+    return;
+  }
+
+  if (method === "tools/call") {
+    const toolName = params && params.name;
+    const args = (params && params.arguments) || {};
+    logToolCall(toolName, args);
+
+    const handler = handlers[toolName];
+    if (!handler) {
+      send({ jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${toolName}` } });
+      return;
+    }
+
+    try {
+      const result = await handler(args);
+      if (result && result.error && !result.ok) {
+        send({ jsonrpc: "2.0", id, result: makeError(result) });
+      } else {
+        send({ jsonrpc: "2.0", id, result: makeResult(result) });
+      }
+    } catch (err) {
+      log("Tool error:", toolName, err.message);
+      send({ jsonrpc: "2.0", id, result: makeError({ error: err.message }) });
+    }
+    return;
+  }
+
+  // 未知 method
+  if (id !== undefined) {
+    send({ jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } });
+  }
+}
+
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on("line", (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  try {
+    const msg = JSON.parse(trimmed);
+    handleRequest(msg).catch((err) => log("handleRequest error:", err.message));
+  } catch (err) {
+    log("JSON parse error:", err.message, "line:", trimmed.slice(0, 200));
+  }
+});
+
+// ─── 本地 HTTP 接口 ────────────────────────────────────────────────────────
+const HTTP_PORT = parseInt(process.env.HEALTH_CLAW_HTTP_PORT || "7926", 10);
+
+const httpServer = http.createServer((req, res) => {
+  // CORS for local
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+  const url = new URL(req.url, `http://127.0.0.1:${HTTP_PORT}`);
+
+  // GET /outbound/stream — SSE
+  if (req.method === "GET" && url.pathname === "/outbound/stream") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
+    });
+    res.write("event: connected\ndata: {}\n\n");
+    sseClients.push(res);
+    req.on("close", () => {
+      const idx = sseClients.indexOf(res);
+      if (idx >= 0) sseClients.splice(idx, 1);
+    });
+    return;
+  }
+
+  // POST 路由——需要读取 body
+  if (req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      let json;
+      try { json = JSON.parse(body); } catch (_) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: "invalid json" })); return; }
+
+      // POST /inbound/message
+      if (url.pathname === "/inbound/message") {
+        let prompt = json.prompt;
+        if (!prompt) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: "prompt required" })); return; }
+        if (!prompt.startsWith("请使用 skill:health-claw ")) {
+          prompt = "请使用 skill:health-claw " + prompt;
+        }
+        const session = json.session || "main";
+        const proc = spawn("openclaw", [
+          "agent", "--message", prompt, "--to", session, "--deliver"
+        ], { stdio: "ignore" });
+        proc.on("error", (err) => {
+          if (err.code === "ENOENT") {
+            res.writeHead(500);
+            res.end(JSON.stringify({ ok: false, error: "openclaw_cli_not_found" }));
+          }
+        });
+        // spawn 异步，立即返回
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, dispatched: true }));
+        return;
+      }
+
+      // POST /inbound/callback
+      if (url.pathname === "/inbound/callback") {
+        const { request_id, response } = json;
+        if (!request_id) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: "request_id required" })); return; }
+        const resolved = resolveCallback(request_id, response);
+        res.writeHead(resolved ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(resolved ? { ok: true } : { ok: false, error: "unknown request_id" }));
+        return;
+      }
+
+      // POST /health
+      if (url.pathname === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, server: "health-claw-mcp-server", version: "2.0.0" }));
+        return;
+      }
+
+      res.writeHead(404);
+      res.end(JSON.stringify({ ok: false, error: "not found" }));
+    });
+    return;
+  }
+
+  // GET /health
+  if (req.method === "GET" && url.pathname === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, server: "health-claw-mcp-server", version: "2.0.0" }));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end(JSON.stringify({ ok: false, error: "not found" }));
+});
+
+httpServer.listen(HTTP_PORT, "127.0.0.1", () => {
+  log(`HTTP server listening on 127.0.0.1:${HTTP_PORT}`);
+});
+
+// ─── 优雅关闭 ──────────────────────────────────────────────────────────────
+process.on("SIGTERM", () => { httpServer.close(); process.exit(0); });
+process.on("SIGINT", () => { httpServer.close(); process.exit(0); });
+
+log("MCP Server started (stdio + HTTP)");
