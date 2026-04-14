@@ -974,6 +974,8 @@ rl.on("line", (line) => {
     log("JSON parse error:", err.message, "line:", trimmed.slice(0, 200));
   }
 });
+rl.on("error", (err) => { log("readline error:", err.message); });
+process.stdin.on("error", (err) => { log("stdin error:", err.message); });
 
 // ─── 本地 HTTP 接口 ────────────────────────────────────────────────────────
 const HTTP_PORT = parseInt(process.env.HEALTH_CLAW_HTTP_PORT || "7926", 10);
@@ -1068,8 +1070,24 @@ const httpServer = http.createServer((req, res) => {
   res.end(JSON.stringify({ ok: false, error: "not found" }));
 });
 
+httpServer.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    log(`⚠️ Port ${HTTP_PORT} already in use — running in MCP-only mode (no HTTP). Companion app features disabled.`);
+  } else {
+    log("HTTP server error:", err.code, err.message);
+  }
+});
+
 httpServer.listen(HTTP_PORT, "127.0.0.1", () => {
   log(`HTTP server listening on 127.0.0.1:${HTTP_PORT}`);
+});
+
+// ─── 全局异常兜底（保持 stdio MCP 可用）───────────────────────────────────
+process.on("uncaughtException", (err) => {
+  log("Uncaught exception:", err.message, err.stack);
+});
+process.on("unhandledRejection", (reason) => {
+  log("Unhandled rejection:", String(reason));
 });
 
 // ─── 优雅关闭 ──────────────────────────────────────────────────────────────
