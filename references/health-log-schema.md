@@ -186,7 +186,24 @@ query_health_log({
 
 **为什么放 health-log 而不是 state.json：** body_data 是时序数据，需要保留历史变化（月报会用到）。state.json 只存"当下"，不存历史。
 
-**月报使用：** scene-monthly-report Step 2 在 `health_trends.body_data_changes` 中读取月初/月末两条记录做对比。
+**双写模式：先 append_health_log 再 update_state(profile)**
+
+体重 / 体脂 / 围度不只要留历史，还要反映到 `profile` 里供下次训练计划参考（如 `profile.basic_info.weight_kg`）。标准顺序：
+
+```
+1. append_health_log({ event: { type: "body_data", ..., data: {...} } })
+   // 留时序历史
+2. update_state({ patch: { profile: { basic_info: { weight_kg: <值>, ... } } } })
+   // 更新当下快照，MCP 会自动追加 profile_update 事件
+```
+
+**写 profile 的两条规则**：
+- 只写用户**明确给**的数值（不猜、不估）
+- 不是所有 body_data 都要进 profile——围度、体脂历史可以只留 jsonl；`weight_kg` 是最常用的，建议进 profile
+
+**也可以用便捷工具 `set_body_data`**：一次调用内部把这两步都做了（写 jsonl + 不写 profile，因为 set_body_data 不知道该更新哪些 profile 字段）。如果你需要同步 profile，还是走上面的 2 步。
+
+**月报使用：** scene-reports.md §3 月报 Step 2 在 `health_trends.body_data_changes` 中通过 `query_health_log` 取月初/月末两条记录做对比。
 
 ---
 

@@ -93,7 +93,8 @@ profile 是 OpenClaw 的"用户笔记本"——长期稳定，OpenClaw 在对话
 {
   "description": "右肩扭伤",
   "reported_at": "2026-03-20",
-  "status": "active"
+  "status": "active",
+  "next_check_at": "2026-04-03"
 }
 ```
 
@@ -102,14 +103,19 @@ profile 是 OpenClaw 的"用户笔记本"——长期稳定，OpenClaw 在对话
 | `description` | string | 自由文本 |
 | `reported_at` | `YYYY-MM-DD` | 首次记录日期；用户回答"还没好"时**重置为今天** |
 | `status` | enum | `active` / `recovered` / `chronic` |
+| `next_check_at` | `YYYY-MM-DD` | 下次询问进展的目标日期；到期后 MCP Server 在 `read_state` 返回 `injury_check` reminder |
 
 **status 枚举：**
 
 | 值 | 含义 |
 |---|---|
-| `active` | 急性伤病，影响训练；超过 14 天未复查 → MCP Server 在 `read_state` 返回 `injury_check` reminder |
+| `active` | 急性伤病，影响训练；到 `next_check_at` 当天或之后 → MCP Server 返回 `injury_check` reminder |
 | `recovered` | 已恢复，保留作历史记录，不触发提醒 |
 | `chronic` | 长期/反复存在，不触发复查提醒，但 OpenClaw 安排训练时始终需要考虑 |
+
+**`next_check_at` 默认值：** `reported_at + 14 天`。模型在 scene-readiness 中捕获到"快好了"之类的信号时改为 `today + 7 天`；用户说"明显好转"可以改为 `today + 3 天`；用户说"还没好"把 `reported_at` 重置为今天且 `next_check_at` 重置为 `today + 14 天`。
+
+**为什么每条伤病有独立 `next_check_at`：** 不同伤病恢复节奏差别大，"全局 14 天"会把轻伤问得太勤、重伤问得太少。MVP 阶段默认 14 天，但保留字段按单条覆盖。
 
 **写入约束：** 数组**整体替换**——更新某条伤病时，模型要把完整数组传回。
 
@@ -136,12 +142,40 @@ warning  = round(max_hr × 0.90)
 
 MCP Server 在 `update_state` 检测到 `profile` 字段变更时，自动追加 `profile_update` 事件到 `health-log.jsonl`，**模型不需要手动调用 `append_health_log`**。
 
-### 2.5 "当下意愿"vs"长期偏好"
+### 2.5 profile 写入时机（硬规则）
 
-- "我今天想试试游泳" → **不更新 profile**，本次临时选择，OpenClaw 直接安排
-- "我以后都不想跑步了" / 用户连续多次拒绝某类训练 → **更新 profile.preferences**
+profile 是**长期稳定**的用户画像。写入要保守——宁可少写，不要多写。
 
-由 OpenClaw 理解上下文判断。
+**写的情况（3 类）：**
+
+| 类别 | 触发 | 示例 |
+|---|---|---|
+| 用户明确给数值 | 用户说出具体数字、具体器材、具体伤病 | "我 28 岁"、"家里只有瑜伽垫"、"右肩拉伤了" |
+| 用户明确表达长期偏好 | 用户连续多次（≥ 3 次）拒绝某类型，或明确说"以后都不..." | "我以后都不想跑步了"、用户连续 3 次拒绝有氧 |
+| 用户主动校正既有字段 | 用户纠正之前的设置 | "我升级了，把等级改成 intermediate 吧" |
+
+**不写的情况（4 类）：**
+
+| 类别 | 为什么不写 | 示例 |
+|---|---|---|
+| 当下一次的意愿 | 临时选择不代表长期偏好 | "今天想试试游泳"、"今天想短一点"——OpenClaw 直接安排，**不**动 preferences |
+| 含糊表达 | 含糊的话可能是情绪，不是偏好 | "最近状态不太行"、"好像不太对劲" |
+| 短期状态波动 | 归 `user_state` 或 `signals`，不归 profile | "最近感冒"、"出差一周"、"今天动力低" |
+| 单次训练反馈 | 归 session summary 或 signals | "今天太重了"、"下次少 5 公斤" |
+
+**判断流程：**
+
+1. 用户说的是**数值**还是**情绪**？情绪 → 不写
+2. 是**这次**还是**长期**？这次 → 不写
+3. 是**身体数据/长期偏好/长期目标**还是**执行反馈**？反馈 → 不写
+
+**由 OpenClaw 自己判断——不要为了"记得多"而过度写入。** 每次 profile 变更都会被 MCP 自动记 `profile_update` 日志，写得多就等于日志噪音多。
+
+### 2.6 goal / fitness_level 特殊规则
+
+- 用户首次 onboarding 填入后，除非用户**主动说**想调，否则**不随意改**。
+- `_meta.goal_updated_at` / `_meta.fitness_level_updated_at` 超过 30 天 → MCP 返回 `profile_review` reminder，由 scene-monthly-report 处理复查。
+- 月报中的复查也只"问一次"——用户点"以后再说"就停，不重置 30 天计时。
 
 ---
 
@@ -391,7 +425,7 @@ body: [...<旧的未过期条目>, <新条目>]
 
 | type | 触发条件 | 处理场景 |
 |---|---|---|
-| `injury_check` | `injuries[].status == "active"` 且 `reported_at` 超过 14 天 | **scene-readiness**（不在 daily/weekly/monthly 处理） |
+| `injury_check` | `injuries[].status == "active"` 且 `next_check_at` ≤ 今天 | **scene-readiness**（不在 daily/weekly/monthly 处理） |
 | `profile_review` | `goal` 或 `fitness_level` 距上次更新超过 30 天 | **scene-monthly-report**（不在其他场景处理） |
 
 **reminder 不是异常**——只是"该复查了"信号，不走 scene-anomaly-alert。

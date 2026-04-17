@@ -95,11 +95,21 @@ function buildReminders(state) {
   const prof = state.profile;
   if (prof && Array.isArray(prof.injuries)) {
     for (const inj of prof.injuries) {
-      if (inj.status === "active" && inj.reported_at) {
-        const d = daysBetween(inj.reported_at, today());
-        if (d >= 14) {
-          reminders.push({ type: "injury_check", description: inj.description, days_since: d });
-        }
+      if (inj.status !== "active") continue;
+      // 首选 next_check_at，缺失时回退为 reported_at + 14 天
+      let dueDate = inj.next_check_at;
+      if (!dueDate && inj.reported_at) {
+        const base = new Date(inj.reported_at);
+        base.setDate(base.getDate() + 14);
+        dueDate = base.toISOString().slice(0, 10);
+      }
+      if (dueDate && dueDate <= today()) {
+        reminders.push({
+          type: "injury_check",
+          description: inj.description,
+          due_date: dueDate,
+          days_overdue: Math.max(0, daysBetween(dueDate, today()))
+        });
       }
     }
   }
@@ -364,6 +374,7 @@ const TOOLS = [
               id: { type: "string" },
               condition: { type: "string" },
               level: { type: "string", enum: ["critical", "warning", "info"] },
+              duration_seconds: { type: "number", description: "条件需持续多少秒才触发告警，避免瞬时抖动；默认 10s；hr_critical 建议 10s, hr_warning 建议 30-60s" },
               local_only: { type: "boolean" }
             },
             required: ["id", "condition", "level"]
