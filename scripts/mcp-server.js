@@ -256,6 +256,20 @@ const TOOLS = [
     }
   },
   {
+    name: "query_health_log",
+    description: "按日期/类型过滤 health-log.jsonl 事件（避免全量读取浪费 token）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start_date: { type: "string", description: "YYYY-MM-DD 起始日期（含），不传即不限" },
+        end_date: { type: "string", description: "YYYY-MM-DD 结束日期（含），不传即不限" },
+        types: { type: "array", items: { type: "string", enum: HEALTH_LOG_EVENT_TYPES }, description: "事件类型过滤；不传即所有 7 种" },
+        limit: { type: "number", description: "返回条数上限，默认 100，最大 1000" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
     name: "write_global_memory",
     description: "写入全局记忆（daily → memory/{date}.md，milestone → MEMORY.md）",
     inputSchema: {
@@ -654,6 +668,34 @@ handlers.append_health_log = (args) => {
   if (!event.ts) return { error: "event.ts 必填" };
   appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
   return { ok: true };
+};
+
+// #5.5 query_health_log
+handlers.query_health_log = (args) => {
+  const { start_date, end_date, types, limit } = args || {};
+  const typeSet = Array.isArray(types) && types.length ? new Set(types) : null;
+  const maxLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000);
+
+  if (!fs.existsSync(HEALTH_LOG_PATH)) {
+    return { ok: true, events: [], count: 0, total_matched: 0, truncated: false };
+  }
+  const content = fs.readFileSync(HEALTH_LOG_PATH, "utf8");
+  const lines = content.split("\n").filter(l => l.trim());
+  const matched = [];
+  for (const line of lines) {
+    let e;
+    try { e = JSON.parse(line); } catch (_) { continue; }
+    if (!e || !e.type) continue;
+    if (typeSet && !typeSet.has(e.type)) continue;
+    if (start_date && e.date && e.date < start_date) continue;
+    if (end_date && e.date && e.date > end_date) continue;
+    matched.push(e);
+  }
+  // 倒序（最新在前），便于模型按时间优先处理
+  matched.sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
+  const truncated = matched.length > maxLimit;
+  const events = matched.slice(0, maxLimit);
+  return { ok: true, events, count: events.length, total_matched: matched.length, truncated };
 };
 
 // #6 write_global_memory

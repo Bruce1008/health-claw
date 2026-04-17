@@ -227,9 +227,14 @@ update_state({
 ```
 get_workout_log({ filter_type: "recent", limit: 100 })
 get_health_summary({ start_date: <月初>, end_date: <月末> })
+query_health_log({ start_date: <月初>, end_date: <月末>, types: ["body_data", "status_change"] })
 ```
 
-按日期窗口在内存里过滤。
+- `get_workout_log`：训练记录，在内存里按日期窗口过滤
+- `get_health_summary`：睡眠 / HRV / 静息心率
+- `query_health_log`：拿 `body_data` 事件用于 `body_data_changes`（取月初、月末各一条做对比）；拿 `status_change` 用于观察月内状态波动（sick / injured 天数）
+
+**不要 `Read health-log.jsonl` 全量**——文件一年 1MB+，走 `query_health_log` 过滤才合理。
 
 ### Step 2：组装 data
 

@@ -19,7 +19,7 @@
 ## Step 1：通用前置
 
 1. `read_state` 拿当前 session / user_state / signals
-2. 检查异常是否**已经在本日报告过**——查 `health-log.jsonl` 当天是否已有同类型的 `signal` 事件。**已报过的不重复报**——交互红线"异常只说一次"。
+2. 检查异常是否**已经在本日报告过**——调 `query_health_log({ start_date: <today>, end_date: <today>, types: ["signal"] })` 拿今日所有 signal，看是否已有同类型（`category` + `detail` 关键词）。**已报过的不重复报**——交互红线"异常只说一次"。
 
 ## Step 2：分支处理
 

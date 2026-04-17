@@ -10,9 +10,9 @@
 
 `<DATA_ROOT>` = `~/Library/Application Support/health-claw/`（方案 B，运行期数据，不进 git）
 
-## 写入方式
+## 读写方式
 
-### 主路径：`append_health_log`
+### 写入：`append_health_log`
 
 ```
 append_health_log({
@@ -37,6 +37,40 @@ MCP Server 实现：
 | `profile_update` | `update_state` 中检测到 `profile` 字段变更后 |
 
 其他 5 种事件（`session` / `body_data` / `signal` / `status_change` / `rest_day`）都需要模型主动调用 `append_health_log` 写入。
+
+### 查询：`query_health_log`
+
+**不要 `Read` 整个 jsonl 文件**——单年文件 1MB+，读进 token 直接爆。按条件过滤只拿需要的条目：
+
+```
+query_health_log({
+  start_date: "2026-04-01",   // 可选，YYYY-MM-DD 含当天
+  end_date: "2026-04-30",     // 可选，YYYY-MM-DD 含当天
+  types: ["session", "body_data"],  // 可选，不传即所有 7 种
+  limit: 100                  // 可选，默认 100，上限 1000
+})
+```
+
+返回：
+
+```json
+{
+  "ok": true,
+  "events": [ ...按 ts 倒序, 最新在前... ],
+  "count": 42,
+  "total_matched": 42,
+  "truncated": false
+}
+```
+
+`truncated == true` 说明实际命中超过 `limit`——此时可以缩小日期窗口或提高 limit 重查。
+
+**典型用法：**
+
+- 月报扫描本月 session：`{ start_date, end_date, types: ["session"] }`
+- 月报体征对比：`{ start_date, end_date, types: ["body_data"] }`
+- 异常审计当天是否已报同类：`{ start_date: today, end_date: today, types: ["signal"] }`
+- 状态变化追溯：`{ types: ["status_change"], limit: 20 }`
 
 ## 通用字段
 
@@ -302,25 +336,34 @@ ISO 8601 with timezone，**UTC**。例：`2026-04-12T08:30:15Z`
 
 ## 扫描使用模式
 
+**原则：** 永远用 `query_health_log` 过滤读取，**不要 `Read` 整个 jsonl**。
+
 ### 周报 / 月报
 
 ```
-1. 读 health-log.jsonl 全量
-2. 按 date 字段过滤窗口期
-3. 按 type 字段分组：
-   - session 用于训练统计
-   - body_data 用于体征趋势
-   - status_change 用于状态变化追溯
-4. 不读 scene_end / signal / rest_day（这些是辅助审计用，不进周月报）
+query_health_log({
+  start_date: <窗口起>,
+  end_date: <窗口止>,
+  types: ["session", "body_data", "status_change"]
+})
 ```
+
+- `session` 用于训练统计
+- `body_data` 用于体征趋势（月报 Step 2 的 `body_data_changes` 取月初/月末两条对比）
+- `status_change` 用于状态变化追溯
+- 不传 `scene_end / signal / rest_day`（辅助审计用，不进周月报）
 
 ### 异常审计
 
 ```
-1. 读 jsonl 最近 100 行
-2. 过滤 type == "signal" 且 severity in [medium, high]
-3. 用于 scene-anomaly-alert 的"今天是否已经报过同类型异常"判断
+query_health_log({
+  start_date: <today>,
+  end_date: <today>,
+  types: ["signal"]
+})
 ```
+
+返回今日所有 signal 事件，用于 scene-anomaly-alert 的"今天是否已报过同类型异常"判断。
 
 ---
 
