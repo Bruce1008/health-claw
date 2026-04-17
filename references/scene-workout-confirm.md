@@ -20,8 +20,6 @@
 
 **pending_adjustments 不是卡点**，Step 3 生成 plan 时读取即可，不在 Step 0 校验。
 
-**为什么一次性读 + 统一判断而不是串行 if：** 每个 if 后跟一个"停手/分支"既冗长又容易漏写 `last_scene` 终态。统一表格化让所有终态都落在同一个出口。
-
 ## Step 1：拉上下文（硬规则）
 
 **生成训练计划前必须调用 `read_state`**——Step 0 已经调过，这一步只是提醒：你现在拿到的 `recent_sessions` 是写计划的核心输入。如果近 7 天数据不够（`recent_sessions` 长度 < 5 且 `consecutive_rest_days` 不足以解释），可以再调一次：
@@ -53,9 +51,7 @@ get_health_summary()  // 拿昨晚睡眠 / HRV / 静息心率
 - 任一黄灯（阈值略低于红灯，由模型自行判断） → `overall = "yellow"` → **降强度**继续 Step 3
 - 全绿 → `overall = "green"` → Step 3 按常规强度
 
-**为什么不复用整个 scene-readiness：** 它包含 show_report + injury_check 复查 + write_daily_log，这些在 workout-confirm 场景里是多余的——训练前用户只想看到训练计划，不想先看一份评估报告再看一份计划。
-
-**如果用户需要一份独立的评估报告**——让他去点"今日身体状态"按钮走 scene-readiness，不要在本场景代劳。
+**硬规则：本场景不调 `show_report({report_type:"readiness_assessment"})`、不做 injury_check 复查、不 write_daily_log 独立评估报告**——这些是 scene-readiness 的职责，本场景只要内部拿到 4 维度等级做 plan 决策。用户想看评估报告走"今日身体状态"按钮触发 scene-readiness。
 
 ## Step 3：决定训练内容
 
@@ -75,7 +71,7 @@ get_health_summary()  // 拿昨晚睡眠 / HRV / 静息心率
 - 长期未训练（`consecutive_rest_days ≥ 5`）后首次训练 → 降量
 - injury_recovery 在 pending_adjustments 中 → 首次降强度
 
-选定后，给出 `session_mode`（六种之一）+ `plan` 内容（结构由 session_mode 决定，参见 `references/state-schema.md` 末尾的 plan 形态参考）。
+选定后，给出 `session_mode`（`set-rest` / `continuous` / `interval` / `flow` / `timer` / `passive` 之一）+ `plan` 内容。不同 session_mode 的 exercises 结构定义在 report-schema.md §2.1。
 
 ## Step 4：下发到 Watch + 展示到 iPhone
 
@@ -123,7 +119,7 @@ request_user_input({
 
 | 回调 | 下一步 |
 |---|---|
-| `开始` | `control_session({ action: "start", session_mode: <s>, source: "planned" })` → 进入 `references/scene-during-session.md`。**用户点开始后 Watch 独立运行 plan**（按 `set_workout_plan` 下发的节奏 + `set_alert_rules` 下发的告警规则）——OpenClaw **不轮询** Watch 数据，只在 Watch 通过 SSE 主动上报事件（告警 / 暂停 / 结束）时才响应 |
+| `开始` | `control_session({ action: "start", session_mode: <s>, source: "planned" })` → 进入 scene-during-session。**用户点开始后 Watch 独立运行 plan**（按 `set_workout_plan` 下发的节奏 + `set_alert_rules` 下发的告警规则）——OpenClaw **不轮询** Watch 数据，只在 Watch 通过 SSE 主动上报事件（告警 / 暂停 / 结束）时才响应 |
 | `换一个` | 回到 Step 3 重新选一个，但要避开刚才已被拒绝的类型；最多换 2 次，第三次仍拒 → 写 `last_scene.status = "skipped"` 并停手 |
 | `跳过` | 不开 session，写 `last_scene = { name: "workout_confirm", status: "skipped" }`，记一条 `rest_day` 事件 |
 | `过一会儿` | `schedule_one_shot({ delay: "30m", prompt: "请使用 skill:health-claw 30 分钟前问过的训练现在方便开始吗" })`，写 `last_scene.status = "skipped"`。**不要在前端做缓存**——30 分钟后用户状态可能变了，让 cron 重新触发本场景重新评估 |

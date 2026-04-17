@@ -13,7 +13,7 @@
 | 字段 | 触发动作 |
 |---|---|
 | `state.profile.basic_info.age` 不存在 | onboarding 未完成 → 写 `last_scene = { name: "readiness", status: "blocked", ts: <now>, summary: "onboarding 未完成" }`，告诉用户先完成首次设置，停手 |
-| `reminders` 包含 `{type: "injury_check", ...}` | 记下待办，**在 Step 5 的 show_report 之后**执行一次"Injury check"交互（见下方专节） |
+| `reminders` 包含 `{type: "injury_check", ...}` | 记下待办，**在 Step 5 的 show_report 之后**执行一次"Injury check"交互（本文件末尾"Injury check 时机"节） |
 | 其他 | 继续 Step 1 |
 
 **不做**的检查（模型不手动做，MCP Server 不会暴露无效状态给 read_state）：

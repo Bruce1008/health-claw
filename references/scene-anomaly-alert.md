@@ -14,7 +14,7 @@
 | `hr_critical` | 心率 > `profile.alert_hr.critical` **持续 ≥ 10 秒** | 高 |
 | `hr_warning` | 心率 > `profile.alert_hr.warning` **持续 ≥ 30 秒** | 中 |
 
-**为什么要持续多少秒而不是瞬时：** 心率监测会有传感器抖动、动作切换瞬时飙升等假阳性。瞬时超阈值反复报会打扰用户、降低告警可信度。Watch 通过 `set_alert_rules` 下发的 `duration_seconds` 字段在**本地**做滑动窗口判断，只有持续达到时长才震动 + 上报 OpenClaw。
+**持续时长由 `set_alert_rules` 的 `duration_seconds` 下发**——Watch 在本地做滑动窗口判断，只有持续达到时长才震动 + 上报 OpenClaw。瞬时超阈值不报。
 
 ### 用户主动反馈类（即时判据，OpenClaw 在对话中识别）
 
@@ -49,7 +49,7 @@
 control_session({ action: "stop" })
 ```
 
-→ 立即停止训练，跳转 `references/scene-post-session.md` 走复盘流程。复盘的 `analysis` 字段写明因为告警而中止。
+→ 立即停止训练，跳转 scene-post-session 走复盘流程。复盘的 `analysis` 字段写明因为告警而中止。
 
 更新 user_state：
 

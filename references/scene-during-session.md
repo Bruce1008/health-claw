@@ -42,12 +42,12 @@ append_health_log({
 })
 ```
 
-3. 按严重度决定下一步（判据见 `references/scene-anomaly-alert.md` Step 0 的用户反馈类表）：
+3. 按严重度决定下一步：
 
 | 严重度 | 措辞示例 | 动作 |
 |---|---|---|
-| 低/中 | "小痛"、"有点疼"、"怪怪的" | 不停训，`send_notification({target:"watch", body:"记录了，建议降低强度。要继续吗？"})`，回原事件循环 |
-| 高 | "很痛"、"拉伤了"、"动不了"、"头晕" | `control_session({action:"stop"})` → 跳转 `references/scene-post-session.md`；`user_state.status` 改为 `injured` 或 `sick` 并写 `status_change` 事件 |
+| 低/中 | "小痛"、"有点疼"、"怪怪的"、"不太对劲" | 不停训，`send_notification({target:"watch", body:"记录了，建议降低强度。要继续吗？"})`，回原事件循环 |
+| 高 | "很痛"、"剧痛"、"拉伤了"、"动不了"、"头晕"、"想吐"、"站不稳" | `control_session({action:"stop"})` → 跳转 scene-post-session；`user_state.status` 改为 `injured` 或 `sick` 并写 `status_change` 事件 |
 
 4. 出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "<pain_mild|pain_strong|dizziness>" }`。
 
@@ -57,21 +57,19 @@ append_health_log({
 control_session({ action: "stop" })
 ```
 
-→ 跳转 `references/scene-post-session.md`。**本场景不做 post-session 的工作**（不写复盘、不更新 recent_sessions）。
+→ 跳转 scene-post-session。**本场景不做 post-session 的工作**（不写复盘、不更新 recent_sessions）。
 
 ### 1.C：心率告警事件（Watch 已本地震动 + 持续超阈值后上报）
 
 由于 `set_alert_rules` 下发时已含 `duration_seconds`（critical 10s / warning 30s），Watch 端先本地震动告警且根据 `local_only` 可能本地暂停；OpenClaw 接到事件后：
 
-1. **不催促用户，不刷屏**——异常只报一次（同日同类型 signal 去重见 `scene-anomaly-alert.md` Step 1）
+1. **不催促用户，不刷屏**——异常只报一次。同日同类型 signal 去重靠 `query_health_log({start_date:<today>, end_date:<today>, types:["signal"]})` 查今日是否已有同 `category` + 相近 `detail` 的条目，有则不重复写。
 2. 按级别处理：
 
 | 级别 | 动作 |
 |---|---|
-| `critical` | `control_session({action:"stop"})` → 跳转 `scene-post-session`；post-session 的 `completion` 写 `partial`，`analysis` 字段说明"训练 X 分钟时心率超过 critical 持续 10 秒+，已停止"。**不在本场景写 signal**——交给 `scene-anomaly-alert` 统一处理 |
+| `critical` | `control_session({action:"stop"})` → 跳转 scene-post-session；post-session 的 `completion` 写 `partial`，`analysis` 字段说明"训练 X 分钟时心率超过 critical 持续 10 秒+，已停止"。**signal 写入交给 scene-anomaly-alert 统一处理**（避免双写） |
 | `warning` | 不强制停；写 signal 事件 + `send_notification({target:"watch", body:"心率偏高，注意节奏"})`。继续等后续事件 |
-
-详见 `references/scene-anomaly-alert.md`（严重度判据 + signal 去重 + 状态更新流程）。
 
 3. 出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "hr_critical|hr_warning 已处理" }`。
 
@@ -82,7 +80,7 @@ control_session({ action: "stop" })
 1. 引导用户走 Watch 上的"结束训练"（触发 1.B），本次 session 以 `partial` 完结进 post-session
 2. 若用户还想继续练别的 → 让他从 App 重新点"锻炼一下"，走 `scene-workout-confirm` 重新生成 plan
 
-理由：session 一旦开始，plan 已下发到 Watch；中途热替换 plan 会让 Watch 引导与 OpenClaw 认知不同步。**用 stop + restart 比 hot-swap 更简单可靠**。
+**硬规则：session 中不做 plan 热替换**——Watch 已按 `set_workout_plan` 下发的节奏独立运行，中途改 plan 会让两边认知不同步。stop + restart 是唯一路径。
 
 ## 不在本场景做的事
 

@@ -141,7 +141,7 @@ show_report({
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `type` | string | 训练类型，6 大类之一 |
-| `session_mode` | enum | 6 值之一（与 state-schema 一致） |
+| `session_mode` | enum | 6 值：`set-rest` / `continuous` / `interval` / `flow` / `timer` / `passive` |
 | `estimated_duration_min` | int | 预估总时长 |
 | `intensity_target` | enum | `high` / `medium` / `low` |
 | `exercises` | array | 动作列表，结构因 session_mode 不同而异 |
@@ -162,7 +162,7 @@ show_report({
 ### 2.2 写作规则
 
 - **不施压。** 不写"今天必须练完"
-- **降量要写原因**，让用户理解为什么计划比平常轻
+- **降量必须在 `notes` 写原因**（如"本次降量 10%（连续高强度后恢复）"）
 - **passive 模式时只写 type + notes**，其他字段可省略
 
 ---
@@ -201,37 +201,27 @@ show_report({
 | `analysis` | string | 核心 | 2-3 句话复盘（**只描述这次，不预测下次**） |
 | `next_check_in` | string | 选填 | 下次再见时间提示，例："明天 / 后天 / 休息 2 天后"；**只说时间，不说练什么** |
 
-### 3.1 completion 枚举
+### 3.1 completion 枚举（2 值）
+
+`full` / `partial`。`user_initiated` 时该字段省略不写。
 
 | 值 | 触发 |
 |---|---|
 | `full` | 正常完成 |
-| `partial` | 用户提前结束（pause 后 stop）或被告警强制停止 |
+| `partial` | 用户提前结束（pause 后 stop）或被告警强制停止——两种都用 partial，差别写在 `analysis` 里 |
 
-**注意：** 原先有过第三个值 `aborted`（告警强制停）。现在合并进 `partial`——告警停止和用户主动停止在复盘展示上没必要分开，区别可以在 `analysis` 里用文字说明；告警事件本身有 `scene-anomaly-alert` 的 `signal` 日志留痕。
-
-### 3.2 为什么删掉 `next_hint`
-
-老版本有 `next_hint: "明天可安排背部或休息一天"` 这种字段。问题：
-
-- "建议练什么"是**训练决策**，属于下次 `scene-workout-confirm` 的职责，而不是本次复盘的展示文案
-- 写进 `next_hint` 会被前端展示 + 进日志（scene_end.summary 会引用）→ 变成"对未来的承诺"，违反"不施压"
-- 真正需要影响下次训练的决策（降量、避开肩部、连续高强度后轻练），通过写 `training_state.pending_adjustments` 传递给 `scene-workout-confirm`，**不走 UI**
-
-所以复盘里只保留 `next_check_in`（时间）+ `analysis`（事实描述），其余归 `pending_adjustments`。
-
-### 3.3 两点禁忌
+### 3.2 两点禁忌
 
 - **`source == "user_initiated"` 时不写 `completion`**——用户自发运动只记录事实，不评价"完成 / 未完成"
 - **不施压**："下次再加 5 公斤"这种话不写。分析只描述**这次**发生了什么
 
-### 3.4 partial（告警停止）情况下 analysis 必须说明原因
+### 3.3 partial（告警停止）情况下 analysis 必须说明原因
 
 ```
 "analysis": "训练 18 分钟时心率超过 critical 阈值（179），自动停止。建议休息 + 喝水，必要时就医。"
 ```
 
-### 3.5 分级降级
+### 3.4 分级降级
 
 - **核心字段全缺** → 说明 session 根本没跑完，**不要硬生成 post_session 报告**，写 `last_scene.status = "needs_context"`
 - **选填字段缺（calories / metrics / next_check_in）** → 照常生成，对应字段省略或填 `null`，**不写 needs_context**
@@ -282,7 +272,7 @@ show_report({
 | `date` | `YYYY-MM-DD` | 核心 | 日报覆盖的"今天" |
 | `narrative` | string | 核心 | **2-3 段自然语言叙述**，有"人感"地把今天的状态串起来；事实层描述，不施压不预测 |
 | `sleep` | object | 选填 | 睡眠数据；缺失时整体省略或字段填 `null` |
-| `activity` | object | 选填 | 24h 内的运动记录；无运动见 §4.4 |
+| `activity` | object | 选填 | 24h 内的运动记录；当天无运动时填 `{sessions: [], total_calories: 0, summary: "今天没有运动记录"}` |
 | `body_signals` | array | 选填 | 过去 24h 内的非过期 `signals.body` 条目，为空时 `[]` |
 | `recovery_status` | object | 选填 | HRV / 静息心率快照；缺失时整体省略 |
 
@@ -293,8 +283,7 @@ show_report({
 - 用平实的第三人称或第二人称（"你今天 / 今天" 都可以），不用命令式
 - **只描述今天发生了什么**，不预测明天，不给建议
 - 缺数据时自然绕过（"睡眠数据今天没同步到" 而不是硬填 null）
-
-**老版本有 `tomorrow_hint` 字段**——已删除。理由同 post_session 的 `next_hint`：给下次训练的建议属于 `pending_adjustments`（走 scene-workout-confirm 时消费），不走 UI。
+- **不写"明天练什么"**——训练方向走 `pending_adjustments`，不走 UI
 
 ### 4.2 sleep 子字段
 
@@ -388,7 +377,7 @@ show_report({
 | `highlights` | string[] | 选填 | 0-3 条事实层观察 |
 | `concerns` | string[] | 选填 | 0-3 条事实层观察 |
 
-**老版本 `next_week_hint` 已删除**——理由同 post_session 的 `next_hint`（见 §3.2）。方向性调整走 `pending_adjustments`。
+**本报告不写"下周练什么"**——方向性调整走 `pending_adjustments`，不走 UI。
 
 ### 5.1 highlights / concerns 写作规则
 
@@ -473,7 +462,7 @@ show_report({
 | `health_trends.body_data_changes` | array | 选填 | 月初/月末体重体脂对比；为空时填 `[]` |
 | `goal_progress.current_goal` | string | 核心 | 当前 `profile.goal` |
 | `goal_progress.observation` | string | 核心 | 一段话描述本月与 goal 的关系，**不评价不施压** |
-| `goal_progress.alignment` | enum | 核心 | 4 值（见 §6.1） |
+| `goal_progress.alignment` | enum | 核心 | 4 值：`aligned` / `partial` / `drifting` / `too_early` |
 | `fitness_level_observation.current` | enum | 核心 | 当前 `profile.fitness_level` |
 | `fitness_level_observation.trend` | enum | 选填 | `improving` / `stable` / `declining`；数据不足留 `null` |
 | `fitness_level_observation.evidence` | string | 选填 | 一句话证据 |
@@ -500,7 +489,7 @@ show_report({
 
 ### 6.3 复查触发位置
 
-monthly 是**唯一**会主动向用户提问复查的报告（fitness_level 或 goal，**最多一次**）。详见 scene-reports.md §3 Step 3。
+monthly 是**唯一**会主动向用户提问复查的报告（fitness_level 或 goal，**最多一次**）。触发流程在 scene-reports.md 的月报章节实现。
 
 ### 6.4 0 训练时
 
@@ -539,7 +528,7 @@ monthly 是**唯一**会主动向用户提问复查的报告（fitness_level 或
 - **narrative 是核心字段**：即使数值数据全缺，只要能写出几句事实描述，就能出报告
 - 单一选填字段缺 ≠ 整份报告缺——前端 UI 需要按选填字段做容错渲染
 
-**`needs_context` 的唯一触发条件：** 核心字段全部拿不到，或 narrative 凑不出 2 句事实。**不要因为单个选填字段空就跳 needs_context**——老版本的"缺一项就 needs_context"过于脆弱。
+**`needs_context` 的唯一触发条件：** 核心字段全部拿不到，或 narrative 凑不出 2 句事实。**不要因为单个选填字段空就跳 needs_context**。
 
 ---
 

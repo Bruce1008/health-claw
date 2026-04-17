@@ -78,7 +78,7 @@ query_health_log({
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `type` | enum | 7 种之一（见下方表） |
+| `type` | enum | 7 种：`scene_end` / `session` / `body_data` / `signal` / `status_change` / `rest_day` / `profile_update` |
 | `date` | `YYYY-MM-DD` | 事件发生日期（用户本地日期） |
 | `ts` | ISO 8601 | 事件发生精确时间戳（UTC） |
 
@@ -155,9 +155,7 @@ query_health_log({
 |---|---|---|
 | `session` | object | session 完整快照，结构与 state-schema 中的 `recent_sessions` 每条一致 |
 
-**为什么是嵌套对象 `session`** 而不是平铺：与 recent_sessions 结构对齐，方便周/月报扫描时复用同一段解析逻辑。
-
-**写入位置：** scene-post-session.md Step 5。
+**写入位置：** scene-post-session 写完 recent_sessions 后紧接一条。
 
 ---
 
@@ -184,7 +182,7 @@ query_health_log({
 | `data` | object | 开放结构，常见 key：`weight_kg` / `body_fat_pct` / `waist_cm` / `chest_cm` / `arm_cm` 等 |
 | `source` | enum | `user_input`（对话）/ `healthkit_sync`（HealthKit 同步） |
 
-**为什么放 health-log 而不是 state.json：** body_data 是时序数据，需要保留历史变化（月报会用到）。state.json 只存"当下"，不存历史。
+body_data 是时序数据，留历史给月报用；state.json 只存"当下"。
 
 **双写模式：先 append_health_log 再 update_state(profile)**
 
@@ -203,7 +201,7 @@ query_health_log({
 
 **也可以用便捷工具 `set_body_data`**：一次调用内部把这两步都做了（写 jsonl + 不写 profile，因为 set_body_data 不知道该更新哪些 profile 字段）。如果你需要同步 profile，还是走上面的 2 步。
 
-**月报使用：** scene-reports.md §3 月报 Step 2 在 `health_trends.body_data_changes` 中通过 `query_health_log` 取月初/月末两条记录做对比。
+**月报使用：** 月报场景通过 `query_health_log` 取月初/月末两条 body_data 做对比，填入 `health_trends.body_data_changes`。
 
 ---
 
@@ -337,10 +335,7 @@ query_health_log({
 
 ISO 8601 with timezone，**UTC**。例：`2026-04-12T08:30:15Z`
 
-为什么 date 用本地、ts 用 UTC：
-
-- date 用于按"自然天"扫描（周/月报），必须用本地
-- ts 用于精确排序，UTC 避免时区混乱
+**组合规则：** date = 本地日期（按"自然天"扫描）；ts = UTC 时间戳（用于精确排序）。
 
 ### 数值字段
 

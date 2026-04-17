@@ -14,13 +14,7 @@
 
 ### 数据窗口
 
-`daily_report` 覆盖 **前一天 22:00 → 当天 22:00** 的滑动 24 小时窗口。
-
-为什么是 22:00 → 22:00 而不是 0:00 → 24:00：
-
-- 22:00 时 HealthKit 的睡眠（昨晚）/HRV/静息心率数据已经完全同步
-- 一份日报里同时包含"昨晚怎么睡的 → 今天做了什么 → 今天的状态"才有连贯性
-- 0:00 触发会把睡眠数据拆到两份日报里
+`daily_report` 覆盖 **前一天 22:00 → 当天 22:00** 的滑动 24 小时窗口。窗口选择是为了在 HealthKit 同步完成后把"昨晚睡眠 → 今天活动 → 今天状态"串成一份。
 
 ### Step 0：前置检查
 
@@ -49,6 +43,7 @@ get_workout_log({ filter_type: "by_date", date: <today> })
 ```json
 {
   "date": "<today>",
+  "narrative": "<2-3 段人感叙述, 把睡眠/运动/信号/恢复串成完整的一天; 事实层, 不施压不预测>",
   "sleep": {
     "total_min": "<number>",
     "deep_min": "<number>",
@@ -69,10 +64,11 @@ get_workout_log({ filter_type: "by_date", date: <today> })
     "hrv_trend": "<rising|stable|falling>",
     "resting_hr": "<number>",
     "summary": "<一句话>"
-  },
-  "tomorrow_hint": "<一句话方向建议，不是计划>"
+  }
 }
 ```
+
+`narrative` 是核心字段——即使数值数据全缺，只要能写出 2 句事实就能出报告。**不写"明天练什么"**，方向性调整走 `pending_adjustments`。
 
 `body_signals` 取 state 中 `signals.body` 在过去 24h 的非过期条目。
 
@@ -102,7 +98,7 @@ update_state({
 |---|---|---|
 | 性质 | 回顾（过去 24h 怎么样） | 前瞻（现在适合干什么） |
 | 触发 | 22:00 cron + 用户主动 | 训练前 + 用户主动问 |
-| 输出 | 数据汇总 + 一句话方向建议 | 4 维度评估 + 建议方向 |
+| 输出 | narrative + 数据汇总 | 4 维度评估 + 建议方向 |
 | 是否可能阻断训练 | 否 | 是（红灯时建议不练） |
 
 **daily_report 不调用 readiness_assessment**。两者的数据来源类似，但聚合方式不同。
@@ -145,6 +141,7 @@ get_health_summary({ start_date: <7天前>, end_date: <today> })
 ```json
 {
   "period": { "start": "<7 天前>", "end": "<today>" },
+  "narrative": "<2-3 段人感叙述, 把本周训练 + 体征趋势串起来; 事实层, 不施压>",
   "training": {
     "total_sessions": "<number>",
     "total_duration_min": "<number>",
@@ -162,12 +159,11 @@ get_health_summary({ start_date: <7天前>, end_date: <today> })
     "resting_hr_trend": "<rising|stable|falling>"
   },
   "highlights": ["<0-3 条事实层观察>"],
-  "concerns": ["<0-3 条事实层观察>"],
-  "next_week_hint": "<一句话方向建议>"
+  "concerns": ["<0-3 条事实层观察>"]
 }
 ```
 
-`by_type` **全部 6 个 key 必须存在**（0 也写）。
+`by_type` **全部 6 个 key 必须存在**（0 也写）。**不写"下周练什么"**，方向性调整走 `pending_adjustments`。
 
 `highlights` / `concerns` 写作规则：
 
@@ -241,6 +237,7 @@ query_health_log({ start_date: <月初>, end_date: <月末>, types: ["body_data"
 ```json
 {
   "period": { "start": "<月初>", "end": "<月末 或 today>" },
+  "narrative": "<3-5 段人感叙述, 把训练 + 体征 + goal 进展串起来; 事实层, 不施压>",
   "training": {
     "total_sessions": "<number>",
     "total_duration_min": "<number>",
@@ -261,7 +258,7 @@ query_health_log({ start_date: <月初>, end_date: <月末>, types: ["body_data"
   "goal_progress": {
     "current_goal": "<profile.goal>",
     "observation": "<一段话，描述本月数据与 goal 的关系，不评价不施压>",
-    "alignment": "<aligned|partial|drifting>"
+    "alignment": "<aligned|partial|drifting|too_early>"
   },
   "fitness_level_observation": {
     "current": "<profile.fitness_level>",
@@ -271,6 +268,8 @@ query_health_log({ start_date: <月初>, end_date: <月末>, types: ["body_data"
   "phase_advice": ["<1-3 条阶段建议>"]
 }
 ```
+
+`alignment` 4 值：`aligned`（训练方向与 goal 一致）/ `partial`（部分一致）/ `drifting`（明显偏离）/ `too_early`（goal 设定 < 30 天，样本不足，避免刚改 goal 就被"drifting"施压）。
 
 ### Step 3：profile 复查（月报独有）
 
@@ -334,4 +333,4 @@ update_state({
 | 性质 | 状态 + 当天活动 | 频次 / 类型分布 / 短期趋势 | 目标进度 / 阶段建议 |
 | 是否复查 profile | 否 | 否 | **是**（fitness_level 或 goal，最多一次） |
 | 是否写 MEMORY | 否 | 否 | **是** |
-| 方向建议 | 一句话 hint | 一句话 hint | 1-3 条阶段建议 |
+| 文字层 | narrative 2-3 段 | narrative 2-3 段 | narrative 3-5 段 + `phase_advice` 1-3 条 |

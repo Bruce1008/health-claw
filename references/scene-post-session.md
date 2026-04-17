@@ -123,17 +123,15 @@ show_report({
     duration_min: <number>,
     calories: <number, HealthKit activeEnergyBurned>,
     intensity: <high|medium|low>,
-    completion: "<full|partial>",  // aborted 已废弃; 被告警中止的也记 partial + analysis 里说明
+    completion: "<full|partial>",  // 2 值; 被告警中止的记 partial, 在 analysis 里说明
     metrics: { avg_hr, max_hr, ... },
-    narrative: "<2-3 段人感复盘, 见 report-schema §3>",
+    analysis: "<2-3 句话事实层复盘: 这次发生了什么, 不预测下次>",
     next_check_in: "<只说时间, 例 '明天'/'后天'/'休息 2 天后再练', 不说练什么>"
   }
 })
 ```
 
-**关于 `next_check_in` 的严格边界**：只写**时间**（"明天"、"后天"、"休息 1 天"），**不写内容**（不写"下次练力量"、"下次做有氧"）。
-
-**为什么不写内容**：训练内容决策由下一次 `scene-workout-confirm` 在拿到最新 readiness 后生成，在 post-session 就预告训练类型会让 pending_adjustments 和实际 plan 脱节。训练调整通过 `pending_adjustments`（降量 / injury_recovery）写回 state，让下次 confirm 场景消费，**不通过 UI 文字传递**。
+**关于 `next_check_in` 的严格边界**：只写**时间**（"明天"、"后天"、"休息 1 天"），**不写内容**（不写"下次练力量"、"下次做有氧"）。训练内容调整走 `pending_adjustments`（降量 / injury_recovery），让下次 scene-workout-confirm 消费，**不通过 UI 文字传递**。
 
 **其他禁忌**：
 
@@ -179,7 +177,7 @@ update_state({
 | `get_session_live` 返回 `{ active: false }` 且没有 last_session 数据 | 至少写 `last_scene = { name: "post_session", status: "needs_context" }`，告诉用户"今天的运动数据没拿到，要不要手动告诉我练了什么"，然后让用户用对话补 |
 | user_state 被改成 `injured` | recent_sessions 里的 intensity 强制为 `low`（无论实际多重）；fatigue_estimate 强制为 `high`；写 status_change 事件 |
 | 用户提前结束（pause 后 stop） | `completion: "partial"`，正常走 Step 1-8 |
-| 训练中被心率 critical 强制停 | `completion: "partial"`，`narrative` 开头点明"本次因心率告警中止, 实际训练 X 分钟"，并在 Step 5 追加 `signal` 事件 |
+| 训练中被心率 critical 强制停 | `completion: "partial"`，`analysis` 开头点明"本次因心率告警中止, 实际训练 X 分钟"，并在 Step 5 追加 `signal` 事件 |
 
 ---
 

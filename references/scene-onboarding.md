@@ -39,7 +39,7 @@ update_state({
         weekly_report_time: <Q10 或 "Sun 20:00">
       },
       fitness_level: <Q3: beginner|intermediate|advanced>,
-      injuries: <见 §3>,
+      injuries: <数组; 见本文件"几个特殊细节"的 injuries 映射规则>,
       max_hr_measured: null
       // 不要手动算 alert_hr——MCP Server 会自动算并写入
     },
@@ -128,7 +128,7 @@ write_daily_log({
 get_health_summary()  // 拉昨晚的睡眠/HRV/静息心率
 ```
 
-根据返回数据 + `read_state` 的 profile，组装一份 `readiness_assessment` 报告（4 个维度结构见 `references/report-schema.md`），然后：
+根据返回数据 + `read_state` 的 profile，组装一份 `readiness_assessment` 报告——4 个维度固定 key：`physical_readiness`（睡眠）/ `stress_load`（HRV）/ `recovery_status`（静息心率）/ `activity_context`（最近 session）。每个维度填 `{level: "green"|"yellow"|"red", detail: "<一句话>"}`，再给 `overall` + `suggestions`。然后：
 
 ```
 show_report({
