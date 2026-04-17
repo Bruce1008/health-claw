@@ -7,14 +7,34 @@
 
 ## Step 0：识别异常类型
 
-| 类型 | 触发 | 严重度 |
+### 心率类（Watch 本地判断，持续超过阈值才上报）
+
+| 类型 | 判据 | 严重度 |
 |---|---|---|
-| `hr_critical` | 心率超过 `profile.alert_hr.critical` | 高 |
-| `hr_warning` | 心率超过 `profile.alert_hr.warning` 持续一段时间 | 中 |
-| `pain_strong` | 用户主动说"很痛 / 受伤了 / 拉伤了" | 高 |
-| `dizziness` | 用户主动说"头晕 / 想吐 / 站不稳" | 高 |
-| `pain_mild` | 用户主动说"小痛 / 不太对劲" | 中 |
-| `signal_overload` | 一周内 body signals ≥ 5 条 | 中 |
+| `hr_critical` | 心率 > `profile.alert_hr.critical` **持续 ≥ 10 秒** | 高 |
+| `hr_warning` | 心率 > `profile.alert_hr.warning` **持续 ≥ 30 秒** | 中 |
+
+**为什么要持续多少秒而不是瞬时：** 心率监测会有传感器抖动、动作切换瞬时飙升等假阳性。瞬时超阈值反复报会打扰用户、降低告警可信度。Watch 通过 `set_alert_rules` 下发的 `duration_seconds` 字段在**本地**做滑动窗口判断，只有持续达到时长才震动 + 上报 OpenClaw。
+
+### 用户主动反馈类（即时判据，OpenClaw 在对话中识别）
+
+| 类型 | 判据 | 严重度 |
+|---|---|---|
+| `pain_strong` | 用户用"很痛 / 剧痛 / 拉伤了 / 受伤了 / 拉不开 / 动不了" 等**明确强烈**措辞 | 高 |
+| `dizziness` | 用户说"头晕 / 想吐 / 站不稳 / 眼前发黑 / 快晕倒" | 高 |
+| `pain_mild` | 用户说"有点疼 / 小痛 / 不太对劲 / 怪怪的" 等**可继续但值得留意**的措辞 | 中 |
+
+**高/中严重度判据总则：**
+
+- **高 = 无法继续训练或风险明显**（强烈疼痛 / 头晕 / 心率持续危险区 / 明确受伤）——立即 stop
+- **中 = 可继续但需记录提醒**（轻微不适 / 心率略高 / 信号堆积）——不 stop，记录 + 通知
+- 含糊不清的措辞（"不太对劲"）倾向于**中**严重度；若用户追加强烈描述升级到**高**
+
+### 信号堆积类
+
+| 类型 | 判据 | 严重度 |
+|---|---|---|
+| `signal_overload` | 一周内 `signals.body` + health-log 中 `signal` 事件累计 ≥ 5 条（通过 `query_health_log({start_date:<7天前>, types:["signal"]})` 判断） | 中 |
 
 ## Step 1：通用前置
 
@@ -133,7 +153,7 @@ write_daily_log({
 
 | reminder | 处理位置 |
 |---|---|
-| `injury_check`（active 伤病 14 天未复查） | **scene-readiness**，不走异常 |
+| `injury_check`（active 伤病 `next_check_at` 到期） | **scene-readiness**，不走异常 |
 | `profile_review`（30 天未复查 goal/fitness_level） | **scene-monthly-report**，不走异常 |
 
 reminders 是常规的"该复查了"信号，**不是异常**。本场景只处理实时的、突发的、高强度的安全事件。

@@ -1,19 +1,20 @@
 # scene: post-session（训练后）
 
-> 触发：
-> - `control_session({ action: "stop" })` 之后立刻进入本场景
-> - 不论 session 是 `planned` 还是 `user_initiated`、是否被用户提前结束、是否因为不适被中止，都走本场景
+> **唯一触发**：`control_session({ action: "stop" })` 成功返回后，MCP Server 把 `state.active_session` 清为 null，紧接着进入本场景。
+>
+> stop 的发起方可能是：用户在 Watch 上点"结束训练"、during-session / anomaly-alert 场景因告警或高严重度 signal 调用 stop。**无论哪种来源都走本场景**，不再分岔。
 
 ## Step 0：前置检查
 
-1. `read_state` 拿到当前 `last_scene`、`training_state`、`user_state`、`profile`。
-2. 调 `get_session_live` 一次拿到本次 session 的最终数据（如果 Watch 已经把 session 收尾了，可能返回 `{ active: false, last_session: {...} }`）。
+1. `read_state` 拿到 `last_scene`、`training_state`、`user_state`、`profile`。
+2. 确认 `state.active_session == null`（`control_session(stop)` 应该已经清掉）。若不为 null → 说明 stop 没成功，写 `last_scene = { name: "post_session", status: "blocked", ts: <now>, summary: "active_session 未清" }`，停手让用户重试 stop。
+3. 调 `get_session_live` 一次拿本次 session 的最终数据（收尾后返回 `{ active: false, last_session: {...} }`）。
 
 ## Step 1：评估本次 session
 
 模型综合下面信息判断：
 
-- `duration_min`、`calories`、训练类型 / `session_mode`
+- `duration_min`、`calories`（= HealthKit `activeEnergyBurned`，由 Watch 直接读取后上报，**不要自己估算**）、训练类型 / `session_mode`
 - 心率走势（如果可拿）
 - `profile.fitness_level`
 - `recent_sessions` 最近几条对比
@@ -27,13 +28,23 @@
   "session_mode": "<set-rest|continuous|interval|flow|timer|passive>",
   "intensity": "<high|medium|low>",
   "duration_min": <number>,
-  "calories": <number>,
+  "calories": <number from HealthKit activeEnergyBurned>,
   "source": "<planned|user_initiated>",
-  "summary": "<一句话, 自由文本>"
+  "summary": "<一句话评估方向, 见下>"
 }
 ```
 
 `intensity` 由模型综合判定，**不要简单按时长**。瑜伽 60 分钟可能是 low，HIIT 15 分钟可能是 high。
+
+**summary 必须给出评估方向**（不是流水账），举例：
+
+- ✅ "偏量不偏强，恢复快，下次可以加组"
+- ✅ "体感偏累但心率没拉起来，说明节奏偏快 / 休息不够"
+- ✅ "完成度高，节奏稳"
+- ❌ "做了 30 分钟力量训练"（等同 `type` + `duration_min`，冗余）
+- ❌ "挺好的"（空话）
+
+评估方向是为了让下一次 workout-confirm / 周报能直接引用——没方向等于没评估。
 
 ## Step 2：判断 fatigue_estimate
 
@@ -110,22 +121,27 @@ show_report({
     type: <训练类型>,
     session_mode: <session_mode>,
     duration_min: <number>,
-    calories: <number>,
+    calories: <number, HealthKit activeEnergyBurned>,
     intensity: <high|medium|low>,
-    completion: "<full|partial|aborted>",
+    completion: "<full|partial>",  // aborted 已废弃; 被告警中止的也记 partial + analysis 里说明
     metrics: { avg_hr, max_hr, ... },
-    analysis: "<2-3 句话的复盘, 不要医学诊断, 不要施压>",
-    next_hint: "<下次什么时候 / 练什么 类型, 建议而非命令>"
+    narrative: "<2-3 段人感复盘, 见 report-schema §3>",
+    next_check_in: "<只说时间, 例 '明天'/'后天'/'休息 2 天后再练', 不说练什么>"
   }
 })
 ```
 
-**两点禁忌**：
+**关于 `next_check_in` 的严格边界**：只写**时间**（"明天"、"后天"、"休息 1 天"），**不写内容**（不写"下次练力量"、"下次做有氧"）。
 
-- **不写完成度评估给 user_initiated 的 session**——用户自发的运动只记录事实，不评价"完成 / 未完成"。具体差异：
-  - `source == "planned"`：可以说"完成度 92%"
-  - `source == "user_initiated"`：只说时长 / 消耗，**不**说完成度
+**为什么不写内容**：训练内容决策由下一次 `scene-workout-confirm` 在拿到最新 readiness 后生成，在 post-session 就预告训练类型会让 pending_adjustments 和实际 plan 脱节。训练调整通过 `pending_adjustments`（降量 / injury_recovery）写回 state，让下次 confirm 场景消费，**不通过 UI 文字传递**。
+
+**其他禁忌**：
+
+- **不写完成度评估给 user_initiated 的 session**——用户自发的运动只记录事实，不评价"完成 / 未完成"。
+  - `source == "planned"`：`completion` 字段正常填 `full` / `partial`
+  - `source == "user_initiated"`：`completion` 字段**省略**，只说时长 / 消耗
 - **不施压** "下次再加 5 公斤" 这种话不说。
+- **不医学诊断** 心率异常 / 痛感只描述事实，不给病名。
 
 ## Step 7：消耗评估（仅 user_initiated）
 
@@ -143,7 +159,7 @@ show_report({
 
 ```
 write_daily_log({
-  content: "## 训练复盘\n\n- 类型: <type>\n- 时长: <duration_min> 分钟\n- 强度: <intensity>\n- 摘要: <summary>\n- 下次建议: <next_hint>\n"
+  content: "## 训练复盘\n\n- 类型: <type>\n- 时长: <duration_min> 分钟\n- 强度: <intensity>\n- 评估方向: <summary>\n- 下次检查: <next_check_in>\n"
 })
 
 update_state({
@@ -163,7 +179,7 @@ update_state({
 | `get_session_live` 返回 `{ active: false }` 且没有 last_session 数据 | 至少写 `last_scene = { name: "post_session", status: "needs_context" }`，告诉用户"今天的运动数据没拿到，要不要手动告诉我练了什么"，然后让用户用对话补 |
 | user_state 被改成 `injured` | recent_sessions 里的 intensity 强制为 `low`（无论实际多重）；fatigue_estimate 强制为 `high`；写 status_change 事件 |
 | 用户提前结束（pause 后 stop） | `completion: "partial"`，正常走 Step 1-8 |
-| 训练中被心率 critical 强制停 | `completion: "aborted"`，写 `signal` 事件，把告警情况写进 analysis 字段 |
+| 训练中被心率 critical 强制停 | `completion: "partial"`，`narrative` 开头点明"本次因心率告警中止, 实际训练 X 分钟"，并在 Step 5 追加 `signal` 事件 |
 
 ---
 

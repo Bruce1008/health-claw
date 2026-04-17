@@ -8,9 +8,18 @@
 
 ## Step 0：前置检查
 
-1. `read_state`
-2. 若 `profile.basic_info.age` 不存在 → onboarding 未完成 → 不能评估，写 `last_scene = { name: "readiness", status: "blocked" }`，告诉用户先完成首次设置。
-3. 若 `read_state` 返回 `reminders` 中含 `injury_check` → 见本 doc 末尾"Injury check 时机"。
+一行 `read_state`，看三个字段：
+
+| 字段 | 触发动作 |
+|---|---|
+| `state.profile.basic_info.age` 不存在 | onboarding 未完成 → 写 `last_scene = { name: "readiness", status: "blocked", ts: <now>, summary: "onboarding 未完成" }`，告诉用户先完成首次设置，停手 |
+| `reminders` 包含 `{type: "injury_check", ...}` | 记下待办，**在 Step 5 的 show_report 之后**执行一次"Injury check"交互（见下方专节） |
+| 其他 | 继续 Step 1 |
+
+**不做**的检查（模型不手动做，MCP Server 不会暴露无效状态给 read_state）：
+- 不用校验 state.json 是否存在——MCP 保证 read_state 永远返回合法结构
+- 不用校验 signals 是否过期——MCP 在 read_state 内已清理
+- 不用判断 reminders 的优先级——本场景只关心 injury_check，profile_review 是月报的事
 
 ## Step 1：拉数据
 
@@ -104,20 +113,23 @@ update_state({
 request_user_input({
   prompt: "顺便问一下: 你之前提到的<injury.description>现在怎么样了？",
   input_type: "select",
-  options: ["好了", "还没好", "老毛病了"],
+  options: ["好了", "快好了", "还没好", "老毛病了"],
   target: "phone"
 })
 ```
 
-收到回调后：
+收到回调后（注意：MCP Server 的 `request_user_input` 是 Promise 阻塞实现——回调返回后模型仍然在**本 turn 内**，场景上下文完整，继续执行下面的 `update_state` 即可，**不需要重读文件**）：
 
-| 用户回答 | 动作 |
-|---|---|
-| 好了 | `update_state` 把对应 injury 的 `status` 改为 `recovered`（**传完整 injuries 数组**），并往 `pending_adjustments` 加一条 `{type: "injury_recovery", reason: <description>, created_at: <today>}`，下次首次训练时 `scene-workout-confirm` 会读到并降量 |
-| 还没好 | `update_state` 把对应 injury 的 `reported_at` 改为今天（重置 14 天计时），其他字段保留 |
-| 老毛病了 | `update_state` 把对应 injury 的 `status` 改为 `chronic` |
+| 用户回答 | injuries 该条的动作 | pending_adjustments |
+|---|---|---|
+| 好了 | `status` → `recovered`（**传完整 injuries 数组**） | 加一条 `{type: "injury_recovery", reason: <description>, created_at: <today>}`，下次首次训练时 `scene-workout-confirm` 会消费并降量 |
+| 快好了 | 保持 `status: "active"`；`next_check_at` → `<today + 7 天>`（比默认 14 天短，因为用户自己说快好了） | 不加（还未恢复，不走 injury_recovery） |
+| 还没好 | 保持 `status: "active"`；`reported_at` → `today`；`next_check_at` → `<today + 14 天>`（重置计时） | 不加 |
+| 老毛病了 | `status` → `chronic` | 不加（chronic 伤病由训练时长期避开相关动作） |
 
-**复查只在每天第一次 readiness 时做一次**，不要在同一天反复问。判断方式：检查当天 `health-log.jsonl` 是否已有 `injury_check_done` 类型的事件——如果场景里有需要可以补一条；最简单的判断是看本会话上下文里是否已经做过这个交互。
+**复查只在每天第一次 readiness 时做一次**，不要在同一天反复问。判断方式：靠本 turn 的会话上下文——本场景执行中已经调过 request_user_input 就不再调。cron 每天只触发一次 readiness；用户主动再问时，模型看对话历史知道已经问过。
+
+**手动抑制机制（可选）：** 如果想在多轮 session 间也记住"今天问过了"，可以用 `query_health_log({ start_date: <today>, end_date: <today>, types: ["scene_end"] })` 查今天是否已有 `scene: "readiness"` 且 summary 里包含 "injury_check_asked" 的记录——但 MVP 阶段不要求这么做。
 
 ---
 
