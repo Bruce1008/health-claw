@@ -104,8 +104,12 @@ control_session({ action: "stop" })
 每次本场景的事件处理完都写 last_scene：
 
 ```
-update_state({ patch: { last_scene: { name: "during_session", status: <done|skipped|error>, ts: <now> } } })
-append_health_log({ event: { type: "scene_end", scene: "during_session", status: <...>, ... } })
+update_state({
+  patch: {
+    last_scene: { name: "during_session", status: <done|skipped|error>, ts: <now>, summary: "<本次事件摘要>" }
+  }
+})
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 `during_session` 不写 `write_daily_log`——session 中可能触发多次本场景，全部交给 `scene-post-session` 在结束时合并写一次。

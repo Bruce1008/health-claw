@@ -109,8 +109,13 @@ request_user_input({
 无论分支结果如何，出口都要写：
 
 ```
-append_health_log({ event: { type: "scene_end", scene: "workout_confirm", status: <last_scene.status>, ... } })
-update_state({ patch: { last_scene: { name: "workout_confirm", status: <...>, ts: <now> } } })
+update_state({
+  patch: {
+    last_scene: { name: "workout_confirm", status: <...>, ts: <now>, summary: "<决策摘要>" }
+  }
+})
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
+
 write_daily_log({ content: "## 训练确认\n\n- 决策: <开始 / 换一个 / 跳过 / 过一会儿>\n- 计划: <摘要 或 ->\n" })
 ```
 

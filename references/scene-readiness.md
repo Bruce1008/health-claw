@@ -2,7 +2,7 @@
 
 > 触发：
 > - 用户点 App"今日身体状态"按钮 → `请使用 skill:health-claw 评估我今天的身体状态`
-> - 用户在对话里问"我今天能练吗 / 状态怎么样"
+> - 用户在对话里问"我今天能练吗 / 我今天身体状态怎么样"
 > - 训练前（被 `scene-workout-confirm` 调用）
 > - **onboarding 完成后** Step 4 也走这里的判断逻辑
 
@@ -86,11 +86,12 @@ write_daily_log({
   content: "## 状态评估\n\n- overall: <...>\n- 摘要: <一句话>\n- 建议方向: <列表>\n"
 })
 
-append_health_log({
-  event: { type: "scene_end", scene: "readiness", status: "done", date: <today>, ts: <now>, summary: "overall=<...>" }
+update_state({
+  patch: {
+    last_scene: { name: "readiness", status: "done", ts: <now>, summary: "overall=<...>" }
+  }
 })
-
-update_state({ patch: { last_scene: { name: "readiness", status: "done", ts: <now> } } })
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 ---

@@ -27,9 +27,16 @@ MCP Server 实现：
 3. 序列化为单行 JSON + `\n` 追加写入文件
 4. **永不覆写**——只追加，不删除，不修改
 
-### 自动追加：profile_update
+### 自动追加：scene_end / profile_update
 
-`profile_update` 事件由 **MCP Server 在 `update_state` 中自动追加**，模型不需要手动调用 `append_health_log`。其他 6 种事件都需要模型主动调用。
+下列事件**由 MCP Server 自动追加**，模型**禁止**手动调用 `append_health_log`（会被拒绝返回错误）：
+
+| 事件类型 | 自动触发条件 |
+|---|---|
+| `scene_end` | `update_state({last_scene: {name, status, ts, summary}})` 写入成功后 |
+| `profile_update` | `update_state` 中检测到 `profile` 字段变更后 |
+
+其他 5 种事件（`session` / `body_data` / `signal` / `status_change` / `rest_day`）都需要模型主动调用 `append_health_log` 写入。
 
 ## 通用字段
 
@@ -49,7 +56,7 @@ MCP Server 实现：
 
 | type | 触发时机 | 写入方 |
 |---|---|---|
-| `scene_end` | 每个场景结束 | 模型（场景出口） |
+| `scene_end` | 每个场景结束 | **MCP Server 自动**（update_state 写 last_scene 时），模型不手写 |
 | `session` | 训练/运动结束 | 模型（scene-post-session） |
 | `body_data` | 用户提供体重/体脂等身体数据 | 模型（对话中捕获时） |
 | `signal` | 信号捕获（疼痛/出差/没动力） | 模型（scene-anomaly-alert / 对话中） |
@@ -61,7 +68,7 @@ MCP Server 实现：
 
 ## 1. scene_end
 
-每个场景在出口处必须写一条。
+**由 MCP Server 自动追加，模型禁止手动调用 `append_health_log({type:"scene_end"})`（会被拒绝）。**
 
 ```json
 {
@@ -74,15 +81,17 @@ MCP Server 实现：
 }
 ```
 
-| 字段 | 类型 | 说明 |
+| 字段 | 类型 | 来源 |
 |---|---|---|
-| `scene` | string | 场景名（与 SKILL.md 场景索引一致） |
-| `status` | enum | 5 值（与 `last_scene.status` 一致：done / blocked / needs_context / error / skipped） |
-| `summary` | string | 一句话摘要，自由撰写 |
+| `scene` | string | 取自 `last_scene.name` |
+| `status` | enum | 取自 `last_scene.status`，5 值之一：done / blocked / needs_context / error / skipped |
+| `date` | `YYYY-MM-DD` | MCP Server 填入当天本地日期 |
+| `ts` | ISO 8601 | 取自 `last_scene.ts`（模型未传时 MCP 填当前时间） |
+| `summary` | string | 取自 `last_scene.summary`（未传时为空字符串）；一句话摘要 |
+
+**写入方式：** 模型调用 `update_state({ patch: { last_scene: { name, status, ts, summary } } })`，MCP Server 写完 state.json 后自动追加一条 scene_end。
 
 **与 `last_scene` 的关系：** scene_end 是 last_scene 的"历史快照"——last_scene 在 state.json 中只存最后一次（被覆盖），scene_end 在 jsonl 中永久保留全部历史。
-
-**写入时机：** 在 `update_state({patch:{last_scene:...}})` 之后立即追加。
 
 ---
 

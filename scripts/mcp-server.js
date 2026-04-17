@@ -83,8 +83,10 @@ function readState() {
       pending_adjustments: []
     },
     last_scene: null,
-    signals: { body: [], schedule: [], motivation: [] }
+    signals: { body: [], schedule: [], motivation: [] },
+    active_session: null
   };
+  if (!("active_session" in state)) state.active_session = null;
   return state;
 }
 
@@ -569,6 +571,19 @@ handlers.update_state = (args) => {
   // 写入
   writeJSON(STATE_PATH, merged);
 
+  // last_scene 变更自动追加 scene_end 事件
+  if (patch.last_scene && merged.last_scene && merged.last_scene.name && merged.last_scene.status) {
+    const event = {
+      type: "scene_end",
+      scene: merged.last_scene.name,
+      status: merged.last_scene.status,
+      date: today(),
+      ts: merged.last_scene.ts || nowISO(),
+      summary: merged.last_scene.summary || ""
+    };
+    appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
+  }
+
   // profile 变更自动记日志
   if (patch.profile) {
     const changedFields = [];
@@ -627,6 +642,13 @@ handlers.append_health_log = (args) => {
   if (!event || !event.type) return { error: "event.type 必填" };
   if (!HEALTH_LOG_EVENT_TYPES.includes(event.type)) {
     return { error: `event.type 不合法: ${event.type}，允许值: ${HEALTH_LOG_EVENT_TYPES.join("/")}` };
+  }
+  // scene_end / profile_update 由 MCP Server 自动追加，拒绝手动写入防止重复
+  if (event.type === "scene_end") {
+    return { error: "scene_end 由 update_state({last_scene:{name,status,ts,summary}}) 自动写入，不要手动调用" };
+  }
+  if (event.type === "profile_update") {
+    return { error: "profile_update 由 update_state(profile 变更) 自动写入，不要手动调用" };
   }
   if (!event.date) return { error: "event.date 必填" };
   if (!event.ts) return { error: "event.ts 必填" };
@@ -730,7 +752,24 @@ handlers.set_alert_rules = (args) => {
 };
 
 // #13 control_session
+// start/stop 同时维护 state.active_session：start 写入 lock，stop 清除。
+// pause/resume/update 不改动 active_session（session 仍在进行）。
 handlers.control_session = (args) => {
+  const state = readState();
+  if (args.action === "start") {
+    if (state.active_session) {
+      return { ok: false, error: "active_session_exists", detail: "已有 session 在进行，先 stop 才能开新的" };
+    }
+    state.active_session = {
+      started_at: nowISO(),
+      session_mode: args.session_mode || null,
+      source: args.source || null
+    };
+    writeJSON(STATE_PATH, state);
+  } else if (args.action === "stop") {
+    state.active_session = null;
+    writeJSON(STATE_PATH, state);
+  }
   pushSSE("control_session", args);
   return { ok: true, action: args.action };
 };
@@ -812,9 +851,7 @@ handlers.schedule_recurring = (args) => {
           resolve({ ok: false, error: stderr.trim() || `exit code ${code}` });
         }
       } else {
-        // 记日志
-        const event = { type: "scene_end", date: today(), ts: nowISO(), scene: "schedule_registered", status: "done", summary: `cron: ${args.name} = ${args.cron}` };
-        appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
+        // schedule_recurring 不写 scene_end（这不是场景执行，工具调用审计由 logToolCall 兜底）
         resolve({ ok: true, name: args.name, cron: args.cron, tz });
       }
     });

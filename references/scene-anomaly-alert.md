@@ -103,11 +103,12 @@ send_notification({
 ## Step 3：写 last_scene + 出口
 
 ```
-update_state({ patch: { last_scene: { name: "anomaly_alert", status: "done", ts: <now> } } })
-
-append_health_log({
-  event: { type: "scene_end", scene: "anomaly_alert", status: "done", date: <today>, ts: <now>, summary: "<异常类型>" }
+update_state({
+  patch: {
+    last_scene: { name: "anomaly_alert", status: "done", ts: <now>, summary: "<异常类型>" }
+  }
 })
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 
 write_daily_log({
   content: "## 异常预警\n\n- 类型: <...>\n- 严重度: <high|medium>\n- 处理: <stop|notify_only>\n- 用户状态: <user_state.status>\n"

@@ -97,23 +97,20 @@ schedule_recurring({
 | `Fri 20:00` | `0 20 * * 5` |
 | 其他自定义 `<weekday> HH:MM` | 按相同规则拼接 |
 
-## Step 3：写入完成事件 + last_scene
+## Step 3：写入 last_scene + 日志
 
 ```
-append_health_log({
-  event: {
-    type: "scene_end",
-    scene: "onboarding",
-    status: "done",
-    date: <today>,
-    ts: <now ISO8601>,
-    summary: "Onboarding 完成. fitness_level=<Q3>, reminder_mode=<Q9>, injuries_count=<Q8 数量>"
+update_state({
+  patch: {
+    last_scene: {
+      name: "onboarding",
+      status: "done",
+      ts: <now ISO8601>,
+      summary: "Onboarding 完成. fitness_level=<Q3>, reminder_mode=<Q9>, injuries_count=<Q8 数量>"
+    }
   }
 })
-
-update_state({
-  patch: { last_scene: { name: "onboarding", status: "done", ts: <now> } }
-})
+// MCP Server 会自动追加 scene_end 事件到 health-log.jsonl，模型不要手动调用 append_health_log。
 
 write_daily_log({
   content: "## Onboarding 完成\n\n- 年龄: <age>\n- 体能基础: <fitness_level>\n- 主要目标: <goal>\n- 提醒模式: <reminder_mode>\n- 已创建 cron: <列表>\n"
@@ -149,9 +146,8 @@ show_report({
 
 1. 把已写入的 cron 全部 `cancel_scheduled` 删掉。
 2. 用 `update_state` 把 profile 改回空 / 删掉 user_state。
-3. `last_scene = { name: "onboarding", status: "error", ts: <now> }`。
-4. `append_health_log` 一条 `scene_end` 事件，summary 写错误原因。
-5. `write_daily_log` 写失败摘要。
+3. `update_state({ patch: { last_scene: { name: "onboarding", status: "error", ts: <now>, summary: "<错误原因>" } } })`（MCP Server 自动写 scene_end 到 health-log）。
+4. `write_daily_log` 写失败摘要。
 
 App 前端收到 SSE 错误事件后会让用户重新点"完成"重试。**禁止让用户半完成进入主流程**——profile 要么全写要么全空。
 

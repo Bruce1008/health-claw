@@ -25,7 +25,8 @@
 ### Step 0：前置检查
 
 1. `read_state`
-2. 若 `profile.basic_info.age` 不存在 → onboarding 未完成 → 写 `last_scene = { name: "daily_report", status: "blocked" }`，**不要硬生成报告**。
+2. 若 `profile.basic_info.age` 不存在 → onboarding 未完成 → 写 `last_scene = { name: "daily_report", status: "blocked", ts: <now>, summary: "onboarding 未完成" }`，**不要硬生成报告**。
+3. 若 `state.active_session != null` → 用户正在训练中 → 写 `last_scene = { name: "daily_report", status: "skipped", ts: <now>, summary: "用户正在训练，日报延后" }`，并 `schedule_one_shot({ delay: "30m", prompt: "生成今日日报" })` 延后 30 分钟重触发。**不要硬生成报告**（会打断用户训练体验）。
 
 ### Step 1：拉数据
 
@@ -80,8 +81,12 @@ get_workout_log({ filter_type: "by_date", date: <today> })
 ```
 show_report({ report_type: "daily_report", data: { ... } })
 write_daily_log({ content: "## 日报\n\n<简短摘要>\n" })
-append_health_log({ event: { type: "scene_end", scene: "daily_report", status: "done", date: <today>, ts: <now>, summary: "..." } })
-update_state({ patch: { last_scene: { name: "daily_report", status: "done", ts: <now> } } })
+update_state({
+  patch: {
+    last_scene: { name: "daily_report", status: "done", ts: <now>, summary: "<一句话摘要>" }
+  }
+})
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 ### reminders 处理
@@ -125,7 +130,8 @@ update_state({ patch: { last_scene: { name: "daily_report", status: "done", ts: 
 ### Step 0：前置检查
 
 1. `read_state`
-2. 若 `profile.basic_info.age` 不存在 → `last_scene = { name: "weekly_report", status: "blocked" }`，停手。
+2. 若 `profile.basic_info.age` 不存在 → `last_scene = { name: "weekly_report", status: "blocked", ts: <now>, summary: "onboarding 未完成" }`，停手。
+3. 若 `state.active_session != null` → `last_scene = { name: "weekly_report", status: "skipped", ts: <now>, summary: "用户正在训练，周报延后" }`，`schedule_one_shot({ delay: "30m", prompt: "生成本周周报" })`，停手。
 
 ### Step 1：拉数据
 
@@ -175,8 +181,12 @@ get_health_summary({ start_date: <7天前>, end_date: <today> })
 ```
 show_report({ report_type: "weekly", data: { ... } })
 write_daily_log({ content: "## 周报\n\n<简短摘要>\n" })
-append_health_log({ event: { type: "scene_end", scene: "weekly_report", status: "done", date: <today>, ts: <now>, summary: "..." } })
-update_state({ patch: { last_scene: { name: "weekly_report", status: "done", ts: <now> } } })
+update_state({
+  patch: {
+    last_scene: { name: "weekly_report", status: "done", ts: <now>, summary: "<一句话摘要>" }
+  }
+})
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 ### reminders 处理
@@ -209,7 +219,8 @@ update_state({ patch: { last_scene: { name: "weekly_report", status: "done", ts:
 ### Step 0：前置检查
 
 1. `read_state`
-2. 若 `profile.basic_info.age` 不存在 → `last_scene = { name: "monthly_report", status: "blocked" }`，停手。
+2. 若 `profile.basic_info.age` 不存在 → `last_scene = { name: "monthly_report", status: "blocked", ts: <now>, summary: "onboarding 未完成" }`，停手。
+3. 若 `state.active_session != null` → `last_scene = { name: "monthly_report", status: "skipped", ts: <now>, summary: "用户正在训练，月报延后" }`，`schedule_one_shot({ delay: "30m", prompt: "生成上月月报" })`，停手。
 
 ### Step 1：拉数据
 
@@ -290,8 +301,12 @@ write_global_memory({
   target: "milestone",
   content: "## <YYYY-MM> 月度小结\n\n- 训练 <n> 次, <n> 分钟\n- 强度分布: high <n> / medium <n> / low <n>\n- goal: <goal>, alignment: <...>\n- fitness_level: <current>, trend: <...>\n"
 })
-append_health_log({ event: { type: "scene_end", scene: "monthly_report", status: "done", date: <today>, ts: <now>, summary: "..." } })
-update_state({ patch: { last_scene: { name: "monthly_report", status: "done", ts: <now> } } })
+update_state({
+  patch: {
+    last_scene: { name: "monthly_report", status: "done", ts: <now>, summary: "<一句话摘要>" }
+  }
+})
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 > 月报是少数几个会写 `write_global_memory(target: "milestone")` 的场景——把每月关键数字 + 目标进展写进 MEMORY，便于以后回顾。

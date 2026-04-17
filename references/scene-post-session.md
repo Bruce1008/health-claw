@@ -147,12 +147,11 @@ write_daily_log({
 })
 
 update_state({
-  patch: { last_scene: { name: "post_session", status: "done", ts: <now> } }
+  patch: {
+    last_scene: { name: "post_session", status: "done", ts: <now>, summary: "<一句话>" }
+  }
 })
-
-append_health_log({
-  event: { type: "scene_end", scene: "post_session", status: "done", date: <today>, ts: <now>, summary: "<一句话>" }
-})
+// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 ---

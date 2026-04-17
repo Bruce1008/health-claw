@@ -10,7 +10,8 @@ state.json
 ├── profile             # 用户画像（长期）
 ├── training_state      # 训练状态（近期累积）
 ├── last_scene          # 最后一次场景执行的快照
-└── signals             # 时效性信号（72h TTL）
+├── signals             # 时效性信号（72h TTL）
+└── active_session      # 当前进行中的 session（null 表示无）
 ```
 
 **写入方式：** 全部通过 `update_state({patch: {...}})` 深度合并。**数组字段整体替换**，不追加——模型必须传完整新数组。
@@ -184,7 +185,7 @@ MCP Server 在 `update_state` 检测到 `profile` 字段变更时，自动追加
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `date` | `YYYY-MM-DD` | 训练日期 |
-| `type` | string | 训练类型，6 大类之一（见下方） |
+| `type` | string | 力量训练 / 有氧 / HIIT / 瑜伽-普拉提 / 拉伸-恢复 / 休闲运动 |
 | `session_mode` | enum | 6 值（见下方） |
 | `intensity` | enum | `high` / `medium` / `low`，**模型综合判断**，不简单按时长 |
 | `duration_min` | int | 时长（分钟） |
@@ -256,6 +257,7 @@ MCP Server 在 `update_state` 检测到 `profile` 字段变更时，自动追加
 | `name` | string | 场景名（与 SKILL.md 场景索引一致） |
 | `status` | enum | 5 值（见下方） |
 | `ts` | ISO 8601 | 场景结束时间戳 |
+| `summary` | string | 一句话摘要，会被自动写进 health-log.jsonl 的 scene_end 事件 |
 
 **`status` 枚举（5 值）：**
 
@@ -269,7 +271,7 @@ MCP Server 在 `update_state` 检测到 `profile` 字段变更时，自动追加
 
 **MCP 校验：** `update_state` 校验 `last_scene.status` 在枚举内，违反时拒绝写入。
 
-**协议要求：** 每个场景必须在出口写 `last_scene`，**所有终态都要覆盖**——不能只写正常路径。
+**协议要求：** 每个场景必须在出口写 `last_scene`（含 `summary`），**所有终态都要覆盖**——不能只写正常路径。写入后 MCP Server **自动追加** `scene_end` 事件到 health-log.jsonl，模型不需要（也禁止）手动 `append_health_log({type:"scene_end"})`。
 
 ---
 
@@ -331,7 +333,43 @@ body: [...<旧的未过期条目>, <新条目>]
 
 ---
 
-## 6. reminders（仅 read_state 返回，不持久化）
+## 6. active_session
+
+```json
+{
+  "started_at": "2026-04-12T07:55:00Z",
+  "session_mode": "set-rest",
+  "source": "planned"
+}
+```
+
+`null` 表示当前无进行中的 session。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `started_at` | ISO 8601 | session 启动时间戳 |
+| `session_mode` | enum | `set-rest` / `continuous` / `interval` / `flow` / `timer` / `passive` |
+| `source` | enum | `planned` / `user_initiated` |
+
+### 6.1 写入责任
+
+**只能由 MCP Server 在 `control_session` 内部维护**，模型**不要**通过 `update_state` 直接写 `active_session`。
+
+| `control_session.action` | 对 active_session 的影响 |
+|---|---|
+| `start` | 写入 `{started_at, session_mode, source}`；若已有 active_session 会返回 `active_session_exists` 错误 |
+| `stop` | 置 `null` |
+| `pause` / `resume` / `update` | 不变（session 仍在进行） |
+
+### 6.2 使用场景
+
+- `scene-workout-confirm` Step 0：若 `active_session != null` → 写 `last_scene.status = "blocked"`，提示已有训练在进行
+- `scene-during-session` Step 0：若 `active_session == null` → 写 `last_scene.status = "blocked"`，说明无进行中训练
+- `scene-daily-report` / `scene-weekly-report` / `scene-monthly-report` Step 0：若 `active_session != null` → 写 `last_scene.status = "skipped"`，用 `schedule_one_shot` 延后 30 分钟重触发；**不要硬生成报告**（会打断用户训练）
+
+---
+
+## 7. reminders（仅 read_state 返回，不持久化）
 
 `read_state` 返回时附加的提示数组，**不阻断读取，不存储在 state.json 内**。MCP Server 每次读取时动态生成。
 
@@ -360,7 +398,7 @@ body: [...<旧的未过期条目>, <新条目>]
 
 ---
 
-## 7. 字段所有权速查
+## 8. 字段所有权速查
 
 | 字段 | 谁写 | 谁读 | 备注 |
 |---|---|---|---|
@@ -374,13 +412,14 @@ body: [...<旧的未过期条目>, <新条目>]
 | `training_state.consecutive_*_days` | 模型（post-session / 休息日） | readiness | 互斥 |
 | `training_state.fatigue_estimate` | 模型（post-session） | readiness | — |
 | `training_state.pending_adjustments` | 模型（写入 + 消费后清除） | workout-confirm | 整体替换 |
-| `last_scene` | 模型（每个场景出口） | 下一次场景前置 | MCP 校验 status |
+| `last_scene` | 模型（每个场景出口） | 下一次场景前置 | MCP 校验 status；写入后自动追加 scene_end 到 health-log |
 | `signals.*` | 模型（捕获时） | readiness / daily-report | TTL 72h，整体替换 |
+| `active_session` | **MCP Server 自动**（control_session 内部） | workout-confirm / during-session / 三大 report | 模型勿手写 |
 | `reminders` | **MCP Server 动态生成** | 模型按场景路由处理 | 不持久化 |
 
 ---
 
-## 8. 与 mcp-server.js 的同步责任
+## 9. 与 mcp-server.js 的同步责任
 
 **本文档是"主"，mcp-server.js 顶部的 const 数组是"从"。** 每次改本文档的枚举值，必须同步改代码常量（避坑清单 §2：零依赖原则，不程序化加载 markdown）。
 

@@ -62,9 +62,8 @@ description: 用户的个人私教 skill。负责健康/运动数据的采集、
 1. **入口必须 `read_state`**（即使本会话内已读过）。
 2. 检查 `read_state` 返回的 `reminders` 数组，若非空按 §4 处理。
 3. 执行场景对应 doc 中的步骤。
-4. **出口必须更新 `last_scene`**（`name` + `status` + `ts`）。
-5. **出口必须 `append_health_log`** 一条 `scene_end` 事件。
-6. **出口必须 `write_daily_log`** 把当前场景的人类可读摘要追加到当天日志。
+4. **出口必须更新 `last_scene`**（`name` + `status` + `ts` + `summary`）。MCP Server 在 `update_state` 写入 last_scene 时**自动追加** scene_end 事件到 health-log.jsonl，模型**禁止**手动调用 `append_health_log({type:"scene_end"})`（会返回错误）。
+5. **出口必须 `write_daily_log`** 把当前场景的人类可读摘要追加到当天日志。
 
 `last_scene.status` 必须是以下五个之一，**不允许只写正常路径**：
 
