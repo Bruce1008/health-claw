@@ -44,12 +44,31 @@ append_health_log({
 
 3. 按严重度决定下一步：
 
-| 严重度 | 措辞示例 | 动作 |
-|---|---|---|
-| 低/中 | "小痛"、"有点疼"、"怪怪的"、"不太对劲" | 不停训，`send_notification({target:"watch", body:"记录了，建议降低强度。要继续吗？"})`，回原事件循环 |
-| 高 | "很痛"、"剧痛"、"拉伤了"、"动不了"、"头晕"、"想吐"、"站不稳" | `control_session({action:"stop"})` → 跳转 scene-post-session；`user_state.status` 改为 `injured` 或 `sick` 并写 `status_change` 事件 |
+**低/中**（"小痛"、"有点疼"、"怪怪的"、"不太对劲"）：不停训。
 
-4. 出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "<pain_mild|pain_strong|dizziness>" }`。
+```
+send_notification({ target: "watch", body: "记录了，建议降低强度。要继续吗？" })
+```
+
+出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "pain_mild 已记录" }`。
+
+**高**（"很痛"、"剧痛"、"拉伤了"、"动不了"、"头晕"、"想吐"、"站不稳"）：
+
+```
+update_state({
+  patch: {
+    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天> }
+  }
+})
+
+append_health_log({
+  event: { type: "status_change", date: <today>, ts: <now>, from: "available", to: "<injured|sick>", reason: <用户原话> }
+})
+
+control_session({ action: "stop" })
+```
+
+→ stop 返回后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "partial"`；`analysis` 开头写"本次因用户反馈强烈不适中止"）。本分支**不写自己的 last_scene**，由 post-session 出口统一写。
 
 ### 1.B：用户在 Watch 上点"结束训练"
 
@@ -57,7 +76,7 @@ append_health_log({
 control_session({ action: "stop" })
 ```
 
-→ 跳转 scene-post-session。**本场景不做 post-session 的工作**（不写复盘、不更新 recent_sessions）。
+→ stop 返回后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "full"`，正常结束）。本分支**不写自己的 last_scene** / **不写 daily_log** / **不更新 recent_sessions**——全部由 post-session 出口统一处理。
 
 ### 1.C：心率告警事件（Watch 已本地震动 + 持续超阈值后上报）
 
@@ -66,12 +85,41 @@ control_session({ action: "stop" })
 1. **不催促用户，不刷屏**——异常只报一次。同日同类型 signal 去重靠 `query_health_log({start_date:<today>, end_date:<today>, types:["signal"]})` 查今日是否已有同 `category` + 相近 `detail` 的条目，有则不重复写。
 2. 按级别处理：
 
-| 级别 | 动作 |
-|---|---|
-| `critical` | `control_session({action:"stop"})` → 跳转 scene-post-session；post-session 的 `completion` 写 `partial`，`analysis` 字段说明"训练 X 分钟时心率超过 critical 持续 10 秒+，已停止"。**signal 写入交给 scene-anomaly-alert 统一处理**（避免双写） |
-| `warning` | 不强制停；写 signal 事件 + `send_notification({target:"watch", body:"心率偏高，注意节奏"})`。继续等后续事件 |
+**`critical` 级别：**
 
-3. 出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "hr_critical|hr_warning 已处理" }`。
+```
+update_state({
+  patch: {
+    signals: { body: [...<旧条目>, { type: "hr_critical", detail: "心率超过 critical 持续 10 秒+", ts: <now> }] }
+  }
+})
+
+append_health_log({
+  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: "hr_critical 持续 10s+", severity: "high" }
+})
+
+control_session({ action: "stop" })
+```
+
+→ stop 返回后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "partial"`；`analysis` 开头写"本次因心率 critical 持续 10 秒+ 中止，实际训练 X 分钟"）。本分支**不写自己的 last_scene**，由 post-session 出口统一写。
+
+**`warning` 级别：**
+
+```
+update_state({
+  patch: {
+    signals: { body: [...<旧条目>, { type: "hr_warning", detail: "心率偏高持续 30 秒", ts: <now> }] }
+  }
+})
+
+append_health_log({
+  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: "hr_warning 持续 30s", severity: "medium" }
+})
+
+send_notification({ target: "watch", body: "心率偏高，注意节奏" })
+```
+
+不强制停训，继续等后续事件。出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "hr_warning 已记录" }`。
 
 ## Step 2：关于"换一个 plan"的边界
 

@@ -1,8 +1,8 @@
 # scene: post-session（训练后）
 
-> **唯一触发**：`control_session({ action: "stop" })` 成功返回后，MCP Server 把 `state.active_session` 清为 null，紧接着进入本场景。
+> **唯一触发**：`control_session({ action: "stop" })` 成功返回后，MCP Server 把 `state.active_session` 清为 null，按 SKILL.md §3 特例规则**在同一 turn 内紧接着执行本场景**。
 >
-> stop 的发起方可能是：用户在 Watch 上点"结束训练"、during-session / anomaly-alert 场景因告警或高严重度 signal 调用 stop。**无论哪种来源都走本场景**，不再分岔。
+> stop 的发起方可能是 `scene-during-session` 的三个分支（1.A 高严重度疼痛、1.B 用户在 Watch 上点结束、1.C 心率 critical）。**无论哪个分支调 stop 都走本场景**，由本场景统一写 `last_scene` + `daily_log`，调用方不重复写。
 
 ## Step 0：前置检查
 

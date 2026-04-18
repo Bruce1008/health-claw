@@ -51,7 +51,7 @@ description: 用户的个人私教 skill。负责健康/运动数据的采集、
 | `daily_report` cron 22:00 触发 / 用户主动说"发今日日报" | 日报 | `references/scene-reports.md` §1 |
 | `weekly_report` cron 触发 / 用户主动说"发本周周报" | 周报 | `references/scene-reports.md` §2 |
 | `monthly_report` cron 触发 / 用户主动说"发上月月报" | 月报 | `references/scene-reports.md` §3 |
-| 训练中 Watch 上报心率告警 / `read_state` 返回 reminders 异常 / 信号阈值触发 | 异常预警 | `references/scene-anomaly-alert.md` |
+| **无进行中 session 时**用户对话反馈强烈不适（疼痛/头晕/受伤）/ `signal_overload`（一周内 signal 事件 ≥ 5 条） | 异常预警 | `references/scene-anomaly-alert.md` |
 
 ---
 
@@ -64,6 +64,8 @@ description: 用户的个人私教 skill。负责健康/运动数据的采集、
 3. 执行场景对应 doc 中的步骤。
 4. **出口必须更新 `last_scene`**（`name` + `status` + `ts` + `summary`）。MCP Server 在 `update_state` 写入 last_scene 时**自动追加** scene_end 事件到 health-log.jsonl，模型**禁止**手动调用 `append_health_log({type:"scene_end"})`（会返回错误）。
 5. **出口必须 `write_daily_log`** 把当前场景的人类可读摘要追加到当天日志。
+
+**特例：`control_session({action:"stop"})` 成功返回后必须在**同一 turn 内**立即加载并执行 `references/scene-post-session.md` 的全部步骤**。调用方场景（during-session 所有分支、手动 stop）不写自己的 last_scene / daily_log，直接把控制权交给 post-session，由 post-session 的出口统一写 `last_scene = { name: "post_session", ... }` 和 daily_log。这是唯一允许的跨场景文件执行流。
 
 `last_scene.status` 必须是以下五个之一，**不允许只写正常路径**：
 
