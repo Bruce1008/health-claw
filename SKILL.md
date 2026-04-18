@@ -11,7 +11,7 @@ description: 用户的个人私教 skill。负责健康/运动数据的采集、
 
 ## 1. 工具调用硬规则
 
-**所有文件 IO 必须走 MCP 工具。** 本 skill 的 MCP Server 暴露了 21 个工具，覆盖所有需要的读写操作。
+**所有文件 IO 必须走 MCP 工具。** 本 skill 的 MCP Server 暴露了 22 个工具，覆盖所有需要的读写操作。
 
 ### 禁止
 
@@ -46,7 +46,7 @@ description: 用户的个人私教 skill。负责健康/运动数据的采集、
 | `请使用 skill:health-claw 完成 onboarding` 开头的 bulk prompt | 初次使用 | `references/scene-onboarding.md` |
 | 用户点"今日身体状态" / 用户问"我今天能练吗" / 训练前 / onboarding 完成后 | 状态评估 | `references/scene-readiness.md` |
 | 用户点"锻炼一下" / 用户说"我准备 xxx" / `daily_workout_reminder` cron 触发 | 训练确认 | `references/scene-workout-confirm.md` |
-| session 进行中、收到 Watch 端 `request_user_input` 回调 / 用户问实时数据 | 训练中 | `references/scene-during-session.md` |
+| 训练中用户主动反馈疼痛/受伤 / Watch 上点"结束训练" / 心率持续超阈值上报 | 训练中 | `references/scene-during-session.md` |
 | `control_session(stop)` 之后 | 训练后 | `references/scene-post-session.md` |
 | `daily_report` cron 22:00 触发 / 用户主动说"发今日日报" | 日报 | `references/scene-reports.md` §1 |
 | `weekly_report` cron 触发 / 用户主动说"发本周周报" | 周报 | `references/scene-reports.md` §2 |
@@ -85,7 +85,7 @@ description: 用户的个人私教 skill。负责健康/运动数据的采集、
 
 | reminder type | 处理 |
 |---|---|
-| `injury_check`（active 伤病超过 14 天未复查） | 在当前场景的合适位置插入一句"你之前提到的 X 部位现在怎么样了？"——**问一次，不追问细节**。用户答"好了"→ 把对应 injury 的 status 改为 `recovered`，同时往 `pending_adjustments` 加一条 `injury_recovery`；用户答"还没好"→ 把 `reported_at` 重置为今天；用户答"老毛病"→ 改为 `chronic`。 |
+| `injury_check`（active 伤病的 `next_check_at` ≤ 今天） | 在当前场景的合适位置插入一句"你之前提到的 X 部位现在怎么样了？"——**问一次，不追问细节**。用户答"好了"→ injury 的 status 改为 `recovered` 并往 `pending_adjustments` 加一条 `injury_recovery`；"快好了"→ 保持 `active`，`next_check_at` 改为 `today + 7 天`；"还没好"→ 保持 `active`，`reported_at` 重置为今天，`next_check_at` 改为 `today + 14 天`；"老毛病"→ 改为 `chronic`。 |
 | `profile_review`（goal / fitness_level 超过 30 天未更新） | **只在月报场景**处理。其他场景遇到此 reminder 一律忽略，等到月报触发时再统一复查。 |
 
 reminders 不是阻断信号，**不要因为存在 reminder 就跳过本来要做的事**。

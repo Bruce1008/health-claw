@@ -208,7 +208,7 @@ function resolveCallback(requestId, response) {
 
 // ─── 工具 schema 定义 ──────────────────────────────────────────────────────
 const TOOLS = [
-  // ── 本地文件工具 (1-8) ──
+  // ── 本地文件工具 (1-9) ──
   {
     name: "read_state",
     description: "读取 state.json 完整内容（附带时效性提醒 reminders）",
@@ -321,7 +321,7 @@ const TOOLS = [
     }
   },
 
-  // ── 设备通信工具 (9-18) ──
+  // ── 设备通信工具 (10-19) ──
   {
     name: "get_health_summary",
     description: "通过 App 桥从 HealthKit 拉取睡眠、HRV、静息心率",
@@ -470,7 +470,7 @@ const TOOLS = [
     }
   },
 
-  // ── 调度工具 (19-21) ──
+  // ── 调度工具 (20-22) ──
   {
     name: "schedule_recurring",
     description: "创建周期性 cron job（日报/周报/月报/定时提醒）",
