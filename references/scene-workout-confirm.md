@@ -6,6 +6,25 @@
 > - `daily_workout_reminder` cron 触发 → `请使用 skill:health-claw 根据当前状态帮我安排今天的训练`
 > - 用户点"过一会儿"被 `schedule_one_shot` 30 分钟后重新触发
 
+## 必需工具顺序（正常路径）
+
+```
+read_state
+→ get_health_summary
+→ set_workout_plan({...})
+→ show_report({report_type:"training_plan", data:{...}})
+→ set_alert_rules({...})
+→ request_user_input({...})              // 让用户确认
+→ update_state({patch:{last_scene:{name:"workout_confirm", status:"done", ts, summary:"..."}}})
+→ write_daily_log({content:"..."})
+```
+
+硬规则：
+
+- **不得**以 `get_session_live` 替代 `read_state` 作为入口。`get_session_live` 只读当前 session 实时状态，不返回 `profile`/`recent_sessions`/`reminders`，无法支撑计划生成。
+- `update_state(last_scene)` 和 `write_daily_log` 必须在结束前完成；没做这两步 = FAIL。
+- 从"口头告诉用户今天练什么"跳到"等用户回复"之前，`set_workout_plan` + `show_report(training_plan)` 必须已经完成——用户确认的前提是 App 端看到了可视化计划。
+
 ## Step 0：前置检查（一次性读完 state 后统一判断，不逐条串行卡）
 
 `read_state` 返回后，按**优先级**从上到下检查；命中一条即按其动作处理，**不再往下**：

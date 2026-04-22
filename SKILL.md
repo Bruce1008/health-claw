@@ -22,6 +22,8 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 ### 必须
 
 - 进入任何场景前必须 `read_state`，**即使本会话内已读过**。上一个场景可能已经修改了 state，缓存的旧值会让安全护栏失效。
+- `read_state` 是 MCP 工具，**不是**内置 `read`；两者不可互换。除非读取 reference 文档且显式提供 `path`，否则**禁止**调用内置 `read`。
+- **最小闭环** = `read_state` → 场景工具 → `show_report`（如适用） → `update_state({patch:{last_scene}})` → `write_daily_log`。**在这条闭环走完之前不要输出最终回复给用户**。
 - 工具调用错误（含 `ok: false` 返回 / `isError: true`）必须立即中断当前场景，写 `last_scene.status = "error"`，不要继续往下做。
 
 ### request_user_input 的 target 选择
@@ -48,6 +50,11 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 | `weekly_report` cron 触发 / 用户主动说"发本周周报" | 周报 | `references/scene-reports.md` §2 | `report-schema.md`（weekly） |
 | `monthly_report` cron 触发 / 用户主动说"发上月月报" | 月报 | `references/scene-reports.md` §3 | `report-schema.md`（monthly） |
 | **无进行中 session 时**用户对话反馈强烈不适（疼痛/头晕/受伤）/ `signal_overload`（一周内 signal 事件 ≥ 5 条） | 异常预警 | `references/scene-anomaly-alert.md` | `health-log-schema.md`（signal / status_change） |
+| 用户闲聊 / 问一般健身知识 / 非本 skill 明确触发条件的自然语言 | 对话 | `references/scene-lightweight.md` §chat | — |
+| 用户主动报告身体信号（体重、体脂、肌肉量、腰围、静息心率自测值等） | 信号采集 | `references/scene-lightweight.md` §signal_capture_chat | `health-log-schema.md`（signal） |
+| 用户说"今天休息" / 连续无训练日 | 休息日 | `references/scene-lightweight.md` §rest_day | `health-log-schema.md`（rest_day） |
+| 用户报告状态变化（生病/受伤/出差/忙/低动机） | 状态变更 | `references/scene-lightweight.md` §status_change | `health-log-schema.md`（status_change） |
+| 用户对前序训练计划/评估提出修正（"我更想练腿"、"别给我跑步"） | 计划修正 | `references/scene-lightweight.md` §user_correction | — |
 
 ---
 

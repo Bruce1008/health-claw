@@ -2,6 +2,24 @@
 
 > 三种报告共享"前置检查 → 拉数据 → 组装 data → show_report → 落盘"的流程骨架，区别在于数据窗口、聚合维度、是否复查 profile。合并在一个文件减少切换成本。
 
+## 最小成功闭环（三种报告都必须走完）
+
+```
+read_state
+→ 拉数据（get_health_summary / query_health_log / get_workout_log，按报告类型选）
+→ show_report({report_type:"daily_report"|"weekly"|"monthly", data:{...}})
+→ write_daily_log({content:"..."})
+→ update_state({patch:{last_scene:{name:"daily_report"|"weekly_report"|"monthly_report", status:"done", ts, summary:"..."}}})
+```
+
+硬规则：
+
+- 仅调用 `show_report` 但**没写** `write_daily_log` + `update_state(last_scene)` 不算完成，记为 FAIL。
+- `show_report` 的 `data` 缺字段或类型错误会被 MCP 拒绝，导致用户端只看到空卡片——**不要**省略必需字段。
+- 三种报告**不**调用 `control_session`、**不**涉及 post-session 跨场景流。
+
+> **Eval / 性能 note**：在 `kimi-code` provider 下，日/周/月报是长耗时场景（单次耗时常 5–10 分钟）。eval 环境跑这些 stage 前 `export SEND_TIMEOUT=900`，不要把 provider 慢推理当成 MCP 挂起。
+
 ---
 
 ## §1 daily-report（每晚日报）

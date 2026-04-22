@@ -2,6 +2,29 @@
 
 > 触发：收到 `请使用 skill:health-claw 完成 onboarding` 开头的 bulk prompt（来源于 App 前端表单提交）。
 
+> **Eval / 性能 note**：onboarding 包含 7 次 tool 调用（`update_state` ×2、`schedule_recurring` ×3–4、`get_health_summary`、`show_report`、`write_daily_log`），在 `kimi-code` provider 下单次耗时 350–600s。eval 环境跑本 stage 前 `export SEND_TIMEOUT=900`。
+
+## 必需调用清单（缺任一步即 FAIL）
+
+```
+read_state
+→ update_state({patch:{profile:{...bulk 翻译结果}}})
+→ schedule_recurring({name:"daily_report", ...})
+→ schedule_recurring({name:"weekly_report", ...})
+→ schedule_recurring({name:"monthly_report", ...})
+→ (条件) schedule_recurring({name:"daily_workout_reminder", ...})   // 仅当 reminder_mode=on
+→ get_health_summary()
+→ show_report({report_type:"readiness_assessment", data:{...}})     // 首次 readiness
+→ write_daily_log({content:"..."})
+→ update_state({patch:{last_scene:{name:"onboarding", status:"done", ts, summary:"..."}}})
+```
+
+硬规则：
+
+- 所有 cron（日/周/月报 + 条件运动提醒）必须通过 `schedule_recurring` 建立；**不得**试图直接写 cron 配置文件。
+- 首次 readiness_assessment 必须在 onboarding 结束前完成，不要只写一句欢迎语就收尾。
+- `write_daily_log` + `update_state(last_scene)` 是最后两步，遗漏任一 = FAIL。
+
 ## 核心原则：一次性 bulk，无交互
 
 **App 前端把所有 onboarding 字段一次性打包成 JSON 随第一条 prompt 送达**，本场景从开始到结束**不与用户做任何一问一答**。整个场景就是把 bulk payload 翻译成 `update_state` + `schedule_recurring` 调用。
