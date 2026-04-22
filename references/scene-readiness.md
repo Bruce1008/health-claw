@@ -6,6 +6,17 @@
 > - 训练前（被 `scene-workout-confirm` 调用）
 > - **onboarding 完成后** Step 4 也走这里的判断逻辑
 
+## 成功路径检查表（所有项必须完成，否则禁止输出评估正文）
+
+1. `read_state`
+2. `get_health_summary`
+3. **不得**调用 `get_workout_log`（state 里的 `recent_sessions` 已够用）
+4. `show_report({report_type:"readiness_assessment", data:{...}})`
+5. `update_state({patch:{last_scene:{name:"readiness", status:"done", ts, summary:"overall=..."}}})`
+6. `write_daily_log({content:"..."})`
+
+**若 4/5/6 任一未完成，不要向用户输出评估结论**。MCP Server 在 `update_state` 写入 last_scene 时自动追加 scene_end，不要手动 `append_health_log({type:"scene_end"})`。
+
 ## Step 0：前置检查
 
 一行 `read_state`，看三个字段：
