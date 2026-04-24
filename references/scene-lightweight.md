@@ -1,24 +1,65 @@
 # scene: lightweight（轻量场景集合）
 
-本文件汇总 5 类触发门槛较低、步骤较少的场景：`chat` / `signal_capture_chat` / `rest_day` / `status_change` / `user_correction`。它们共用 §0 通用骨架，各自章节只补充差异。
+本文件汇总 5 类触发门槛较低、步骤较少的场景：`chat` / `signal_capture_chat` / `rest_day` / `status_change` / `user_correction`。各场景的 pending_nodes 清单见 §0，各自章节只补充差异。
 
 ---
 
-## §0 通用骨架（所有轻量场景必须走完）
+## §0 pending_nodes 清单（每个轻量场景一份，`read_state` 后声明）
 
+`last_scene.name` 取本场景的 `scene_type`。异常收尾（用户取消 → `skipped`、工具失败 → `error`、onboarding 未完成 → `blocked`）由 Server 自动清空 pending_nodes。
+
+**§1 chat**：
+
+```json
+[
+  {"id":"s1_write_daily_log","tool":"write_daily_log"},
+  {"id":"s2_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
 ```
-1. read_state                                ← 入口，无一例外
-2. 场景差异化工具（见下）
-3. update_state({patch:{last_scene:{name, status, ts, summary}}})
-4. write_daily_log({content:"..."})          ← 人类可读摘要
+
+**§2 signal_capture_chat**：
+
+```json
+[
+  {"id":"s1_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
 ```
 
-**硬规则**：
+**§3 rest_day**：
 
-- 任何轻量场景在输出最终回复前，必须完成 `update_state(last_scene)` 和 `write_daily_log`。只输出文字不落盘 = FAIL。
-- `last_scene.name` 取本场景的 `scene_type`（`chat` / `signal_capture_chat` / `rest_day` / `status_change` / `user_correction`）。
-- `last_scene.status` 默认 `done`；用户明确取消则 `skipped`；工具失败则 `error`。
-- MCP Server 在 `update_state` 写入 last_scene 时自动追加 `scene_end` 事件，**不要**手动 `append_health_log({type:"scene_end"})`。
+```json
+[
+  {"id":"s1_rest_log","tool":"append_health_log","match":{"event_type":"rest_day"}},
+  {"id":"s2_training_state","tool":"update_state","match":{"patch":"training_state"}},
+  {"id":"s3_write_daily_log","tool":"write_daily_log"},
+  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+**§4 status_change**：
+
+```json
+[
+  {"id":"s1_status_log","tool":"append_health_log","match":{"event_type":"status_change"}},
+  {"id":"s2_user_state","tool":"update_state","match":{"patch":"user_state"}},
+  {"id":"s3_write_daily_log","tool":"write_daily_log"},
+  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+**§5 user_correction**：
+
+```json
+[
+  {"id":"s1_write_daily_log","tool":"write_daily_log"},
+  {"id":"s2_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+- status_change 若涉及受伤，同时在 s2 之前增加一节点 `{"id":"s1b_profile_injuries","tool":"update_state","match":{"patch":"profile"}}`。
+- user_correction 若需下发新计划，插入 `{"id":"s0a_set_workout_plan","tool":"set_workout_plan"}` + `{"id":"s0b_show_report","tool":"show_report","match":{"report_type":"training_plan"}}` 到 s1 之前。
 
 ---
 

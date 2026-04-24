@@ -2,21 +2,46 @@
 
 > 三种报告共享"前置检查 → 拉数据 → 组装 data → show_report → 落盘"的流程骨架，区别在于数据窗口、聚合维度、是否复查 profile。合并在一个文件减少切换成本。
 
-## 最小成功闭环（三种报告都必须走完）
+## pending_nodes 清单（按报告类型）
 
+`read_state` + 数据拉取后声明对应的一份。
+
+**§1 daily_report**：
+
+```json
+[
+  {"id":"s1_show_report","tool":"show_report","match":{"report_type":"daily_report"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
 ```
-read_state
-→ 拉数据（get_health_summary / query_health_log / get_workout_log，按报告类型选）
-→ show_report({report_type:"daily_report"|"weekly"|"monthly", data:{...}})
-→ write_daily_log({content:"..."})
-→ update_state({patch:{last_scene:{name:"daily_report"|"weekly_report"|"monthly_report", status:"done", ts, summary:"..."}}})
+
+**§2 weekly**：
+
+```json
+[
+  {"id":"s1_show_report","tool":"show_report","match":{"report_type":"weekly"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+**§3 monthly**：
+
+```json
+[
+  {"id":"s1_show_report","tool":"show_report","match":{"report_type":"monthly"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
 ```
 
 硬规则：
 
-- 仅调用 `show_report` 但**没写** `write_daily_log` + `update_state(last_scene)` 不算完成，记为 FAIL。
-- `show_report` 的 `data` 缺字段或类型错误会被 MCP 拒绝，导致用户端只看到空卡片——**不要**省略必需字段。
+- `show_report.data` 缺字段或类型错误会被 MCP 拒绝——**不要**省略必需字段。
 - 三种报告**不**调用 `control_session`、**不**涉及 post-session 跨场景流。
+- Step 0 命中 blocked（onboarding 未完成）/ skipped（active_session 进行中）/ needs_context（`get_health_summary` 空）→ 直接写 `last_scene.status` 非 done，Server 自动清空 pending_nodes，**不需要**补完。
+- monthly 场景若 Step 3 触发了 `request_user_input`，在 s1 之前插入 `{"id":"s0_review_ask","tool":"request_user_input"}` 节点；若用户答"是"还要接 profile 写入，再插入 `{"id":"s0b_profile_write","tool":"update_state","match":{"patch":"profile"}}`。
 
 > **Eval / 性能 note**：在 `kimi-code` provider 下，日/周/月报是长耗时场景（单次耗时常 5–10 分钟）。eval 环境跑这些 stage 前 `export SEND_TIMEOUT=900`，不要把 provider 慢推理当成 MCP 挂起。
 

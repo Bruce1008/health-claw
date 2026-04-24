@@ -6,24 +6,26 @@
 > - `daily_workout_reminder` cron 触发 → `请使用 skill:health-claw 根据当前状态帮我安排今天的训练`
 > - 用户点"过一会儿"被 `schedule_one_shot` 30 分钟后重新触发
 
-## 必需工具顺序（正常路径）
+## pending_nodes 清单
 
-```
-read_state
-→ get_health_summary
-→ set_workout_plan({...})
-→ show_report({report_type:"training_plan", data:{...}})
-→ set_alert_rules({...})
-→ request_user_input({...})              // 让用户确认
-→ update_state({patch:{last_scene:{name:"workout_confirm", status:"done", ts, summary:"..."}}})
-→ write_daily_log({content:"..."})
+正常路径（`read_state` + `get_health_summary` 完成后声明）：
+
+```json
+[
+  {"id":"s1_set_workout_plan","tool":"set_workout_plan"},
+  {"id":"s2_show_report","tool":"show_report","match":{"report_type":"training_plan"}},
+  {"id":"s3_set_alert_rules","tool":"set_alert_rules"},
+  {"id":"s4_confirm","tool":"request_user_input"},
+  {"id":"s5_write_daily_log","tool":"write_daily_log"},
+  {"id":"s6_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
 ```
 
 硬规则：
 
-- **不得**以 `get_session_live` 替代 `read_state` 作为入口。`get_session_live` 只读当前 session 实时状态，不返回 `profile`/`recent_sessions`/`reminders`，无法支撑计划生成。
-- `update_state(last_scene)` 和 `write_daily_log` 必须在结束前完成；没做这两步 = FAIL。
-- 从"口头告诉用户今天练什么"跳到"等用户回复"之前，`set_workout_plan` + `show_report(training_plan)` 必须已经完成——用户确认的前提是 App 端看到了可视化计划。
+- **不得**以 `get_session_live` 替代 `read_state` 作为入口。`get_session_live` 只返回当前 session 实时状态，不含 `profile`/`recent_sessions`/`reminders`。
+- Step 0 命中 blocked/skipped 分支（onboarding 未完成 / active_session 已有 / sick|injured / 内联 readiness=red）时直接写 `last_scene.status` 非 done，Server 自动清空 pending_nodes，**不需要**补完中间节点。
+- 用户点"开始"后，本场景以 `last_scene.status = "done"` 收尾；`control_session(start)` 本身**不**在清单里（由 during-session 监听 Watch 事件触发）。
 
 ## Step 0：前置检查（一次性读完 state 后统一判断，不逐条串行卡）
 

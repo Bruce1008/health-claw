@@ -6,6 +6,47 @@
 >
 > **训练中的所有事件（疼痛、心率告警、Watch 点结束）一律走 `scene-during-session.md`**——本场景不处理进行中的 session。`injury_check` 常规复查走 `scene-readiness.md`，`profile_review` 走 `scene-monthly-report`，都不走本场景。
 
+## pending_nodes 清单（按分支）
+
+Step 0 分类后，按命中分支声明对应的一份：
+
+**2.A 高严重度**（pain_strong / dizziness）：
+
+```json
+[
+  {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
+  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s3_status_log","tool":"append_health_log","match":{"event_type":"status_change"}},
+  {"id":"s4_notify","tool":"send_notification"},
+  {"id":"s5_write_daily_log","tool":"write_daily_log"},
+  {"id":"s6_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+**2.B 中严重度**（pain_mild）：
+
+```json
+[
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
+  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s3_notify","tool":"send_notification"},
+  {"id":"s4_write_daily_log","tool":"write_daily_log"},
+  {"id":"s5_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+**2.C signal_overload**（不发通知）：
+
+```json
+[
+  {"id":"s1_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+Step 1 去重命中（今日已有同类 signal）/ `active_session != null`（routing 错误）/ 用户表述含糊（走 skipped）→ 直接写 `last_scene.status` 非 done，Server 自动清空 pending_nodes，**不需要**补完。
+
 ## Step 0：分类异常严重度
 
 ### 用户主动反馈类（OpenClaw 在对话中识别）

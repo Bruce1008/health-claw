@@ -4,26 +4,28 @@
 
 > **Eval / 性能 note**：onboarding 包含 7 次 tool 调用（`update_state` ×2、`schedule_recurring` ×3–4、`get_health_summary`、`show_report`、`write_daily_log`），在 `kimi-code` provider 下单次耗时 350–600s。eval 环境跑本 stage 前 `export SEND_TIMEOUT=900`。
 
-## 必需调用清单（缺任一步即 FAIL）
+## pending_nodes 清单
 
-```
-read_state
-→ update_state({patch:{profile:{...bulk 翻译结果}}})
-→ schedule_recurring({name:"daily_report", ...})
-→ schedule_recurring({name:"weekly_report", ...})
-→ schedule_recurring({name:"monthly_report", ...})
-→ (条件) schedule_recurring({name:"daily_workout_reminder", ...})   // 仅当 reminder_mode=on
-→ get_health_summary()
-→ show_report({report_type:"readiness_assessment", data:{...}})     // 首次 readiness
-→ write_daily_log({content:"..."})
-→ update_state({patch:{last_scene:{name:"onboarding", status:"done", ts, summary:"..."}}})
+`read_state` 后先声明清单（按 SKILL.md §3）。基础 7 条必走；`reminder_mode == "scheduled"` 时在 s4 之后插入 `s4b_cron_reminder`：
+
+```json
+[
+  {"id":"s1_profile_write","tool":"update_state","match":{"patch":"profile"}},
+  {"id":"s2_cron_daily","tool":"schedule_recurring","match":{"name":"daily_report"}},
+  {"id":"s3_cron_weekly","tool":"schedule_recurring","match":{"name":"weekly_report"}},
+  {"id":"s4_cron_monthly","tool":"schedule_recurring","match":{"name":"monthly_report"}},
+  {"id":"s4b_cron_reminder","tool":"schedule_recurring","match":{"name":"daily_workout_reminder"}},
+  {"id":"s5_show_report","tool":"show_report","match":{"report_type":"readiness_assessment"}},
+  {"id":"s6_write_daily_log","tool":"write_daily_log"},
+  {"id":"s7_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
 ```
 
 硬规则：
 
-- 所有 cron（日/周/月报 + 条件运动提醒）必须通过 `schedule_recurring` 建立；**不得**试图直接写 cron 配置文件。
-- 首次 readiness_assessment 必须在 onboarding 结束前完成，不要只写一句欢迎语就收尾。
-- `write_daily_log` + `update_state(last_scene)` 是最后两步，遗漏任一 = FAIL。
+- 所有 cron 必须通过 `schedule_recurring` 建立；**不得**直接写 cron 配置文件。
+- Step 0 发现 onboarding 已完成（profile.basic_info.age 已存在）→ 直接写 `last_scene = { status: "skipped" }`，**不声明 pending_nodes**。
+- 失败回滚走 `last_scene.status = "error"`，Server 会自动清空 pending_nodes。
 
 ## 核心原则：一次性 bulk，无交互
 

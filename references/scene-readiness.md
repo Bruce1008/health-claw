@@ -6,16 +6,25 @@
 > - 训练前（被 `scene-workout-confirm` 调用）
 > - **onboarding 完成后** Step 4 也走这里的判断逻辑
 
-## 成功路径检查表（所有项必须完成，否则禁止输出评估正文）
+## pending_nodes 清单
 
-1. `read_state`
-2. `get_health_summary`
-3. **不得**调用 `get_workout_log`（state 里的 `recent_sessions` 已够用）
-4. `show_report({report_type:"readiness_assessment", data:{...}})`
-5. `update_state({patch:{last_scene:{name:"readiness", status:"done", ts, summary:"overall=..."}}})`
-6. `write_daily_log({content:"..."})`
+`read_state` 后声明（按 SKILL.md §3）：
 
-**若 4/5/6 任一未完成，不要向用户输出评估结论**。MCP Server 在 `update_state` 写入 last_scene 时自动追加 scene_end，不要手动 `append_health_log({type:"scene_end"})`。
+```json
+[
+  {"id":"s1_show_report","tool":"show_report","match":{"report_type":"readiness_assessment"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+硬规则：
+
+- **不得**调用 `get_workout_log`（`recent_sessions` 已够用）。
+- 若 injury_check reminder 命中，在 s1 之后再插入两个节点：
+  `{"id":"s1b_injury_ask","tool":"request_user_input"}`、
+  `{"id":"s1c_injury_write","tool":"update_state","match":{"patch":"profile"}}`。
+- Step 0 判定 onboarding 未完成或 health_summary 缺失时直接写 `last_scene.status = "blocked"|"needs_context"`，Server 会自动清空 pending_nodes，**不需要**补完余下节点。
 
 ## Step 0：前置检查
 

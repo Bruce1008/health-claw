@@ -23,7 +23,7 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 
 - 进入任何场景前必须 `read_state`，**即使本会话内已读过**。上一个场景可能已经修改了 state，缓存的旧值会让安全护栏失效。
 - `read_state` 是 MCP 工具，**不是**内置 `read`；两者不可互换。除非读取 reference 文档且显式提供 `path`，否则**禁止**调用内置 `read`。
-- **最小闭环** = `read_state` → 场景工具 → `show_report`（如适用） → `update_state({patch:{last_scene}})` → `write_daily_log`。**在这条闭环走完之前不要输出最终回复给用户**。
+- **每个场景必须先声明节点清单**（`update_state({patch:{pending_nodes:[...]}})`），再执行。节点清单在对应 `references/scene-*.md` 开头给出。详见 §3。
 - 工具调用错误（含 `ok: false` 返回 / `isError: true`）必须立即中断当前场景，写 `last_scene.status = "error"`，不要继续往下做。
 
 ### request_user_input 的 target 选择
@@ -58,29 +58,54 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 
 ---
 
-## 3. 场景通用协议
+## 3. 场景通用协议（pending_nodes 任务板）
 
-每个场景都遵守：
+每个场景的闭环靠 `state.pending_nodes` 保证：在场景开始时把本场景必须完成的节点清单写进 state，MCP Server 会在每次非只读工具调用成功后自动弹出一个匹配节点；`last_scene.status = "done"` 在 pending_nodes 非空时会被 Server 拒绝。
 
-1. **入口必须 `read_state`**（即使本会话内已读过）。
-2. 检查 `read_state` 返回的 `reminders` 数组，若非空按 §4 处理。
-3. 执行场景对应 doc 中的步骤。
-4. **出口必须更新 `last_scene`**（`name` + `status` + `ts` + `summary`）。MCP Server 在 `update_state` 写入 last_scene 时**自动追加** scene_end 事件到 health-log.jsonl，模型**禁止**手动调用 `append_health_log({type:"scene_end"})`（会返回错误）。
-5. **出口必须 `write_daily_log`** 把当前场景的人类可读摘要追加到当天日志。
+### 场景入口（必做）
 
-**跨场景特例**：`control_session({action:"stop"})` 成功返回后必须**同一 turn 内**立即加载执行 `references/scene-post-session.md`。调用方场景（during-session、手动 stop）不写自己的 last_scene / daily_log，由 post-session 出口统一写入。这是唯一允许的跨场景执行流。
+1. **必须 `read_state`**（即使本会话内已读过）。
+2. 检查 `reminders`：
+   - `previous_scene_incomplete`：上一场景没走完。要么补完剩余节点（`state.pending_nodes` 直接可见），要么 `control_session({action:"stop"})` 清场（仅在确需中止 session 时），再开新场景。
+   - `injury_check` / `profile_review`：按 §4 / `references/reminders.md` 处理。
+3. **必须 `update_state({patch:{pending_nodes:[...]}})` 声明本场景节点清单**。清单在对应 `references/scene-*.md` 开头给出，按场景分支选对应的那份。
 
-`last_scene.status` 必须是以下五个之一，**不允许只写正常路径**：
+### 节点格式
+
+每个节点 `{id, tool, match?}`。`match` 是 subset 匹配，Server 用它挑选该工具调用对应的节点：
+
+| match 字段 | 含义 |
+|---|---|
+| `patch: "<key>"` | 要求 `args.patch.<key>` 存在。特例：`patch:"last_scene"` 仅当 `last_scene.status === "done"` 时才匹配（用于 close 节点） |
+| `report_type: "<x>"` | `args.report_type === x` |
+| `name: "<x>"` | `args.name === x`（schedule_recurring） |
+| `action: "<x>"` | `args.action === x`（control_session） |
+| `event_type: "<x>"` | `args.event.type === x`（append_health_log） |
+
+只读工具（`read_state` / `get_user_profile` / `get_health_summary` / `get_session_live` / `get_workout_log` / `query_health_log`）不消耗节点。
+
+### 场景出口
+
+- **正常收尾**：清单里最后一个节点一定是 `{id:"...close_done", tool:"update_state", match:{patch:"last_scene"}}`。走完前面所有节点后，再 `update_state({patch:{last_scene:{name, status:"done", ts, summary}}})` 把 close 节点也弹空。pending_nodes 仍非空时 Server 返回 `cannot_close_done_with_pending_nodes`，必须补完。
+- **异常收尾**：`last_scene.status` 写 `blocked / needs_context / error / skipped` 任一，Server 会**自动清空** pending_nodes。
+- `control_session({action:"stop"})` 会同时清空 pending_nodes，作为 during-session → post-session 的跨场景 handoff。
+- MCP Server 在 `update_state` 写入 last_scene 时自动追加 `scene_end` 事件到 health-log，**禁止**手动 `append_health_log({type:"scene_end"})`。
+
+### last_scene.status 五选一
 
 | 值 | 用法 |
 |---|---|
-| `done` | 正常走完 |
-| `blocked` | 被前置条件挡住（如 onboarding 未完成、profile 缺关键字段、session 已被锁） |
-| `needs_context` | 缺数据无法决策（如 `get_health_summary` 返回空、HealthKit 权限被撤销） |
+| `done` | 正常走完（pending_nodes 已弹空） |
+| `blocked` | 前置条件不满足（onboarding 未完成 / profile 缺字段 / session 已锁） |
+| `needs_context` | 缺数据无法决策（`get_health_summary` 空、HealthKit 权限被撤销） |
 | `error` | 工具调用失败、护栏拒绝、回滚 |
-| `skipped` | 用户主动取消 / "过一会儿"推迟 |
+| `skipped` | 用户主动取消 / 推迟 |
 
-**任何场景的写法都不能假设只有 `done` 一种结尾。**
+**禁止**只写 done 分支——任何场景的写法都必须覆盖异常终态。
+
+### 跨场景特例
+
+`control_session({action:"stop"})` 成功返回后必须**同一 turn 内**立即加载执行 `references/scene-post-session.md`。调用方（during-session、手动 stop）不写自己的 last_scene / daily_log，由 post-session 出口统一写。stop 已清空 pending_nodes，post-session 进入时重新声明自己的清单。
 
 ---
 

@@ -4,6 +4,25 @@
 >
 > stop 的发起方可能是 `scene-during-session` 的三个分支（1.A 高严重度疼痛、1.B 用户在 Watch 上点结束、1.C 心率 critical）。**无论哪个分支调 stop 都走本场景**，由本场景统一写 `last_scene` + `daily_log`，调用方不重复写。
 
+## pending_nodes 清单
+
+`read_state` + `get_session_live` 后声明（Step 0 通过后）：
+
+```json
+[
+  {"id":"s1_training_state","tool":"update_state","match":{"patch":"training_state"}},
+  {"id":"s2_session_log","tool":"append_health_log","match":{"event_type":"session"}},
+  {"id":"s3_show_report","tool":"show_report","match":{"report_type":"post_session"}},
+  {"id":"s4_write_daily_log","tool":"write_daily_log"},
+  {"id":"s5_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+硬规则：
+
+- 本场景是 `control_session(stop)` 的接手方；进入前 pending_nodes 已被 stop 清空，**必须在本场景重新声明**。
+- Step 0 发现 active_session 未清 → `last_scene.status = "blocked"`；Step 6 缺数据 → `needs_context`；show_report 失败 → `error`。这些异常终态 Server 会自动清空 pending_nodes，无需手动补完。
+
 ## Step 0：前置检查
 
 1. `read_state` 拿到 `last_scene`、`training_state`、`user_state`、`profile`。

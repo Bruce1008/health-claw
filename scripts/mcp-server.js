@@ -27,6 +27,12 @@ const FATIGUE_ENUM = ["low", "moderate", "high"];
 const REPORT_TYPE_ENUM = ["readiness_assessment", "training_plan", "post_session", "daily_report", "weekly", "monthly"];
 const HEALTH_LOG_EVENT_TYPES = ["scene_end", "session", "body_data", "signal", "status_change", "rest_day", "profile_update"];
 
+// 只读工具：不消耗 pending_nodes 节点，也不会写 state
+const READONLY_TOOLS = new Set([
+  "read_state", "get_user_profile", "get_health_summary",
+  "get_session_live", "get_workout_log", "query_health_log"
+]);
+
 // ─── Mock 数据（eval 脚本通过正则替换这些常量）─────────────────────────────
 const TODAY = "2026-04-12";
 const healthSummary = { sleep: { total_min: 465, deep_min: 102, rem_min: 88, score: 82 }, hrv: { latest: 48, avg_7d: 52, trend: "falling" }, resting_hr: { latest: 58, avg_7d: 56 } };
@@ -84,9 +90,11 @@ function readState() {
     },
     last_scene: null,
     signals: { body: [], schedule: [], motivation: [] },
-    active_session: null
+    active_session: null,
+    pending_nodes: []
   };
   if (!("active_session" in state)) state.active_session = null;
+  if (!Array.isArray(state.pending_nodes)) state.pending_nodes = [];
   return state;
 }
 
@@ -118,6 +126,14 @@ function buildReminders(state) {
     if (prof._meta.goal_updated_at && daysBetween(prof._meta.goal_updated_at, today()) >= 30) fields.push("goal");
     if (prof._meta.fitness_level_updated_at && daysBetween(prof._meta.fitness_level_updated_at, today()) >= 30) fields.push("fitness_level");
     if (fields.length > 0) reminders.push({ type: "profile_review", fields });
+  }
+  if (Array.isArray(state.pending_nodes) && state.pending_nodes.length > 0) {
+    reminders.push({
+      type: "previous_scene_incomplete",
+      remaining_count: state.pending_nodes.length,
+      next_node: state.pending_nodes[0],
+      hint: "上一个场景没走完。先补完 pending_nodes，或 control_session({action:'stop'}) 清场，再开新场景。"
+    });
   }
   return reminders;
 }
@@ -151,6 +167,45 @@ function deepMerge(target, source) {
     }
   }
   return result;
+}
+
+// ─── pending_nodes 匹配 / 弹出 ────────────────────────────────────────────
+// 节点格式: { id, tool, match? }
+// match 可含:
+//   - patch: 字符串，要求 args.patch 里有该 key；特例：patch=="last_scene" 时还要求 status === "done"
+//   - report_type / name / action: 严格等值
+//   - event_type: args.event.type 严格等值
+function nodeMatches(node, toolName, args) {
+  if (!node || node.tool !== toolName) return false;
+  const m = node.match || {};
+  if (m.patch !== undefined) {
+    if (!args || !args.patch || args.patch[m.patch] === undefined) return false;
+    if (m.patch === "last_scene") {
+      if (!args.patch.last_scene || args.patch.last_scene.status !== "done") return false;
+    }
+  }
+  if (m.report_type !== undefined && (!args || args.report_type !== m.report_type)) return false;
+  if (m.name !== undefined && (!args || args.name !== m.name)) return false;
+  if (m.action !== undefined && (!args || args.action !== m.action)) return false;
+  if (m.event_type !== undefined) {
+    const et = args && args.event && args.event.type;
+    if (et !== m.event_type) return false;
+  }
+  return true;
+}
+
+function popMatchingNode(state, toolName, args) {
+  if (!Array.isArray(state.pending_nodes) || state.pending_nodes.length === 0) {
+    return { popped: null, remaining: [] };
+  }
+  for (let i = 0; i < state.pending_nodes.length; i++) {
+    if (nodeMatches(state.pending_nodes[i], toolName, args)) {
+      const popped = state.pending_nodes[i];
+      const remaining = state.pending_nodes.slice(0, i).concat(state.pending_nodes.slice(i + 1));
+      return { popped, remaining };
+    }
+  }
+  return { popped: null, remaining: state.pending_nodes.slice() };
 }
 
 // ─── alert_hr 自动计算 ─────────────────────────────────────────────────────
@@ -1027,6 +1082,24 @@ async function handleRequest(msg) {
     const args = (params && params.arguments) || {};
     logToolCall(toolName, args);
 
+    // ── pending_nodes 前置护栏：last_scene.status=done 必须把节点清单走空 ──
+    if (toolName === "update_state" && args && args.patch && args.patch.last_scene && args.patch.last_scene.status === "done") {
+      const cur = readState();
+      if (Array.isArray(cur.pending_nodes) && cur.pending_nodes.length > 0) {
+        const { remaining } = popMatchingNode(cur, "update_state", args);
+        if (remaining.length > 0) {
+          const errPayload = {
+            ok: false,
+            error: "cannot_close_done_with_pending_nodes",
+            remaining_pending_nodes: remaining,
+            hint: `pending_nodes 里还有 ${remaining.length} 个节点没走完。完成所有节点再把 last_scene.status 写成 done；要中止场景请用 blocked/error/needs_context/skipped，或 control_session({action:"stop"}) 清场。`
+          };
+          send({ jsonrpc: "2.0", id, result: makeError(errPayload) });
+          return;
+        }
+      }
+    }
+
     const handler = handlers[toolName];
     if (!handler) {
       send({ jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${toolName}` } });
@@ -1035,6 +1108,34 @@ async function handleRequest(msg) {
 
     try {
       const result = await handler(args);
+
+      // ── pending_nodes 后处理（仅成功的非只读工具）──
+      if (result && result.ok !== false && !READONLY_TOOLS.has(toolName)) {
+        const cur = readState();
+        let remaining = Array.isArray(cur.pending_nodes) ? cur.pending_nodes.slice() : [];
+        let stateChanged = false;
+        // 异常收尾（非 done 终态）：清空 pending_nodes
+        if (toolName === "update_state" && args && args.patch && args.patch.last_scene && args.patch.last_scene.status && args.patch.last_scene.status !== "done") {
+          if (remaining.length > 0) { remaining = []; cur.pending_nodes = []; stateChanged = true; }
+        }
+        // control_session(stop) handoff：清空 pending_nodes
+        else if (toolName === "control_session" && args && args.action === "stop") {
+          if (remaining.length > 0) { remaining = []; cur.pending_nodes = []; stateChanged = true; }
+        }
+        // 正常路径：弹出一个匹配节点
+        else if (remaining.length > 0) {
+          const { popped, remaining: next } = popMatchingNode(cur, toolName, args);
+          if (popped) { remaining = next; cur.pending_nodes = next; stateChanged = true; }
+        }
+        if (stateChanged) writeJSON(STATE_PATH, cur);
+        if (typeof result === "object" && result !== null) {
+          result.remaining_pending_nodes = remaining.length;
+          if (remaining.length > 0) result.next_pending_node = remaining[0];
+          // 若 result 附带了 state 快照（update_state 等），同步 pending_nodes 避免返回旧值
+          if (result.state && typeof result.state === "object") result.state.pending_nodes = remaining;
+        }
+      }
+
       if (result && result.error && !result.ok) {
         send({ jsonrpc: "2.0", id, result: makeError(result) });
       } else {

@@ -5,6 +5,64 @@
 > - 用户在 Watch 上点"结束训练"
 > - 心率超过 critical 阈值**持续 ≥ 10 秒**（warning 30 秒），Watch 本地震动后上报 OpenClaw
 
+## pending_nodes 清单（按分支）
+
+`read_state` + 分支分类后声明对应的一份。**三个 stop 分支（1.A 高、1.B、1.C critical）不含 close 节点**——`control_session(stop)` 会清空 pending_nodes，由 post-session 另行声明自己的清单。
+
+**1.A 低/中严重度**（疼痛轻，不停训）：
+
+```json
+[
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
+  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s3_notify","tool":"send_notification"},
+  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+**1.A 高严重度**（疼痛强烈，停训 → post-session）：
+
+```json
+[
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
+  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s3_status_change","tool":"update_state","match":{"patch":"user_state"}},
+  {"id":"s4_status_log","tool":"append_health_log","match":{"event_type":"status_change"}},
+  {"id":"s5_stop","tool":"control_session","match":{"action":"stop"}}
+]
+```
+
+**1.B 用户点"结束训练"**：
+
+```json
+[
+  {"id":"s1_stop","tool":"control_session","match":{"action":"stop"}}
+]
+```
+
+**1.C critical 心率告警**（停训 → post-session）：
+
+```json
+[
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
+  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s3_stop","tool":"control_session","match":{"action":"stop"}}
+]
+```
+
+**1.C warning 心率告警**（不停训）：
+
+```json
+[
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
+  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s3_notify","tool":"send_notification"},
+  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+]
+```
+
+Step 0 命中 blocked（`active_session == null`）时直接写 `last_scene.status = "blocked"`，**不声明 pending_nodes**。
+
 ## 核心原则：训练中 OpenClaw 尽量不参与
 
 用户点"开始"后，Watch 按 `set_workout_plan` 下发的节奏独立运行，按 `set_alert_rules` 下发的规则本地告警和震动。**OpenClaw 不轮询**，只在上述三类事件到达时才进入本场景。
