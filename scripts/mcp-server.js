@@ -33,6 +33,9 @@ const READONLY_TOOLS = new Set([
   "get_session_live", "get_workout_log", "query_health_log"
 ]);
 
+// 由 update_state 自动镜像到 health-log 的事件类型——禁止模型手动 append_health_log 写这些
+const AUTO_MIRRORED_EVENT_TYPES = new Set(["signal", "status_change", "session", "rest_day"]);
+
 // ─── Mock 数据（eval 脚本通过正则替换这些常量）─────────────────────────────
 const TODAY = "2026-04-12";
 const healthSummary = { sleep: { total_min: 465, deep_min: 102, rem_min: 88, score: 82 }, hrv: { latest: 48, avg_7d: 52, trend: "falling" }, resting_hr: { latest: 58, avg_7d: 56 } };
@@ -152,6 +155,170 @@ function cleanExpiredSignals(signals) {
   return cleaned;
 }
 
+// ─── projection：按 dot-path 数组裁剪 state ────────────────────────────────
+// projection 例：["profile.basic_info", "user_state", "training_state.recent_sessions"]
+// 始终保留 pending_nodes（模型靠它判断剩余节点）。无效路径静默跳过。
+function projectState(state, paths) {
+  const result = {};
+  for (const p of paths) {
+    if (typeof p !== "string" || !p) continue;
+    const parts = p.split(".");
+    let src = state;
+    let dst = result;
+    let ok = true;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const k = parts[i];
+      if (src == null || typeof src !== "object" || !(k in src)) { ok = false; break; }
+      src = src[k];
+      if (!dst[k] || typeof dst[k] !== "object" || Array.isArray(dst[k])) dst[k] = {};
+      dst = dst[k];
+    }
+    if (!ok) continue;
+    const last = parts[parts.length - 1];
+    if (src && typeof src === "object" && last in src) dst[last] = src[last];
+  }
+  if (!("pending_nodes" in result)) result.pending_nodes = state.pending_nodes;
+  return result;
+}
+
+// ─── 自动镜像 health-log ───────────────────────────────────────────────────
+// update_state 触发的镜像规则：
+//   patch.signals.body 新增项        → signal 事件（去重 by ts+type+detail）
+//   patch.user_state.status 变化     → status_change 事件（reason 取自 patch.user_state._reason 或空）
+//   patch.training_state.recent_sessions 新增项 → session 事件（去重 by date+type+duration_min）
+//   patch.training_state.consecutive_rest_days 从 N → N+1 → rest_day 事件
+function mirrorHealthLog(patch, oldState, _newState) {
+  const events = [];
+  const ts = nowISO();
+  const date = today();
+
+  // 1) signals.body 新增条目
+  if (patch.signals && Array.isArray(patch.signals.body)) {
+    const oldBody = (oldState.signals && Array.isArray(oldState.signals.body)) ? oldState.signals.body : [];
+    const oldKeys = new Set(oldBody.map(e => `${e && e.ts}|${e && e.type}|${e && e.detail}`));
+    for (const entry of patch.signals.body) {
+      if (!entry || typeof entry !== "object") continue;
+      const k = `${entry.ts}|${entry.type}|${entry.detail}`;
+      if (oldKeys.has(k)) continue;
+      const sig = {
+        type: "signal",
+        date,
+        ts: entry.ts || ts,
+        category: "body",
+        signal_type: entry.type || "unspecified",
+        detail: entry.detail || ""
+      };
+      if (entry.severity) sig.severity = entry.severity;
+      events.push(sig);
+    }
+  }
+
+  // 2) user_state.status 变化
+  if (patch.user_state && patch.user_state.status) {
+    const oldStatus = oldState.user_state && oldState.user_state.status;
+    const newStatus = patch.user_state.status;
+    if (oldStatus !== newStatus) {
+      const ev = {
+        type: "status_change",
+        date,
+        ts,
+        from: oldStatus || "unknown",
+        to: newStatus
+      };
+      if (patch.user_state._reason) ev.reason = patch.user_state._reason;
+      events.push(ev);
+    }
+  }
+
+  // 3) training_state.recent_sessions 新增条目
+  if (patch.training_state && Array.isArray(patch.training_state.recent_sessions)) {
+    const newSessions = patch.training_state.recent_sessions;
+    const oldSessions = (oldState.training_state && Array.isArray(oldState.training_state.recent_sessions)) ? oldState.training_state.recent_sessions : [];
+    const oldKeys = new Set(oldSessions.map(s => `${s && s.date}|${s && s.type}|${s && s.duration_min}`));
+    for (const sess of newSessions) {
+      if (!sess || typeof sess !== "object") continue;
+      const k = `${sess.date}|${sess.type}|${sess.duration_min}`;
+      if (oldKeys.has(k)) continue;
+      events.push({
+        type: "session",
+        date: sess.date || date,
+        ts,
+        session: sess
+      });
+    }
+  }
+
+  // 4) training_state.consecutive_rest_days 从 N → N+1
+  if (patch.training_state && typeof patch.training_state.consecutive_rest_days === "number") {
+    const oldCount = (oldState.training_state && typeof oldState.training_state.consecutive_rest_days === "number") ? oldState.training_state.consecutive_rest_days : 0;
+    const newCount = patch.training_state.consecutive_rest_days;
+    if (newCount === oldCount + 1) {
+      events.push({
+        type: "rest_day",
+        date,
+        ts
+      });
+    }
+  }
+
+  return events;
+}
+
+// patch 顶层 key 列表（用于 update_state 返回 changed_keys）
+function topLevelChangedKeys(patch) {
+  if (!patch || typeof patch !== "object") return [];
+  return Object.keys(patch);
+}
+
+// ─── 聚合：get_workout_log / get_health_summary 默认轻量返回 ───────────────
+function aggregateSessions(list) {
+  const byType = {};
+  const byIntensity = { high: 0, medium: 0, low: 0 };
+  let totalDuration = 0;
+  let totalCalories = 0;
+  for (const s of list) {
+    if (!s) continue;
+    if (s.type) byType[s.type] = (byType[s.type] || 0) + 1;
+    if (s.intensity && byIntensity[s.intensity] !== undefined) byIntensity[s.intensity] += 1;
+    if (typeof s.duration_min === "number") totalDuration += s.duration_min;
+    if (typeof s.calories === "number") totalCalories += s.calories;
+  }
+  const dates = list.map(s => s && s.date).filter(Boolean).sort();
+  return {
+    total_sessions: list.length,
+    total_duration_min: totalDuration,
+    total_calories: totalCalories,
+    by_type: byType,
+    by_intensity: byIntensity,
+    date_range: dates.length ? { start: dates[0], end: dates[dates.length - 1] } : null
+  };
+}
+
+function summarizeHealth(latest) {
+  if (!latest) return null;
+  const out = {};
+  if (latest.sleep) {
+    out.sleep = {
+      total_min: latest.sleep.total_min,
+      score: latest.sleep.score
+    };
+  }
+  if (latest.hrv) {
+    out.hrv = {
+      latest: latest.hrv.latest,
+      avg_7d: latest.hrv.avg_7d,
+      trend: latest.hrv.trend
+    };
+  }
+  if (latest.resting_hr) {
+    out.resting_hr = {
+      latest: latest.resting_hr.latest,
+      avg_7d: latest.resting_hr.avg_7d
+    };
+  }
+  return out;
+}
+
 // ─── 深度合并 ──────────────────────────────────────────────────────────────
 function deepMerge(target, source) {
   const result = { ...target };
@@ -266,8 +433,18 @@ const TOOLS = [
   // ── 本地文件工具 (1-9) ──
   {
     name: "read_state",
-    description: "读取 state.json 完整内容（附带时效性提醒 reminders）",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+    description: "读取 state.json（附带时效性提醒 reminders）。可选 projection 按 dot-path 裁剪，省 token。pending_nodes 始终返回。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projection: {
+          type: "array",
+          items: { type: "string" },
+          description: "dot-path 字段列表，例 [\"profile.basic_info\",\"user_state\",\"training_state.recent_sessions\"]。不传或空数组 → 返回完整 state（兼容旧调用）"
+        }
+      },
+      additionalProperties: false
+    }
   },
   {
     name: "get_user_profile",
@@ -276,11 +453,11 @@ const TOOLS = [
   },
   {
     name: "update_state",
-    description: "局部更新 state.json（深度合并 + 枚举校验 + 备份 + alert_hr 自动重算 + profile 变更自动记日志）",
+    description: "局部更新 state.json（深度合并 + 枚举校验 + 备份 + alert_hr 自动重算）。**自动镜像 health-log**：signals.body 新增→signal、user_state.status 变化→status_change（reason 取自 user_state._reason 透传字段）、training_state.recent_sessions 新增→session、consecutive_rest_days N→N+1→rest_day。返回 {ok, changed_keys, remaining_pending_nodes}，不再回传完整 state。",
     inputSchema: {
       type: "object",
       properties: {
-        patch: { type: "object", description: "要合并的字段" }
+        patch: { type: "object", description: "要合并的字段。user_state._reason 字段会被消费用于 status_change 镜像，写入后从 state 剥离。" }
       },
       required: ["patch"],
       additionalProperties: false
@@ -301,7 +478,7 @@ const TOOLS = [
   },
   {
     name: "append_health_log",
-    description: "追加 JSON 事件到 health-log.jsonl（永不覆写）",
+    description: "追加 JSON 事件到 health-log.jsonl（永不覆写）。**禁止手动写 signal/status_change/session/rest_day** —— 这 4 类由 update_state 自动镜像；scene_end/profile_update 也由 Server 自动写入。本工具只用于无对应 state 字段的事件。",
     inputSchema: {
       type: "object",
       properties: {
@@ -350,14 +527,15 @@ const TOOLS = [
   },
   {
     name: "get_workout_log",
-    description: "查询本地训练记录（按日期/类型/最近 N 条）",
+    description: "查询本地训练记录（按日期/类型/最近 N 条）。**默认只返回聚合**（by_type / by_intensity / total_*），省 token；需要原始 sessions 数组传 detail:true（workout-confirm 写计划、daily_report 写 narrative 必须用）。",
     inputSchema: {
       type: "object",
       properties: {
         filter_type: { type: "string", enum: ["by_date", "by_type", "recent"], description: "过滤模式" },
         date: { type: "string", description: "用于 by_date 过滤" },
         type: { type: "string", description: "用于 by_type 过滤" },
-        limit: { type: "number", description: "用于 recent 过滤的条数限制，默认 10" }
+        limit: { type: "number", description: "用于 recent 过滤的条数限制，默认 10" },
+        detail: { type: "boolean", description: "true 时返回 sessions 原始数组；不传 / false 时只返回聚合" }
       },
       additionalProperties: false
     }
@@ -379,12 +557,13 @@ const TOOLS = [
   // ── 设备通信工具 (10-19) ──
   {
     name: "get_health_summary",
-    description: "通过 App 桥从 HealthKit 拉取睡眠、HRV、静息心率",
+    description: "通过 App 桥从 HealthKit 拉取睡眠、HRV、静息心率。**默认只返回精简字段**（total_min/score/latest/avg_7d/trend），省 token；需要完整原始字段（含 deep_min/rem_min 等）传 detail:true。",
     inputSchema: {
       type: "object",
       properties: {
         start_date: { type: "string", description: "YYYY-MM-DD" },
-        end_date: { type: "string", description: "YYYY-MM-DD" }
+        end_date: { type: "string", description: "YYYY-MM-DD" },
+        detail: { type: "boolean", description: "true 时返回完整原始字段；不传 / false 时只返回精简" }
       },
       additionalProperties: false
     }
@@ -573,13 +752,16 @@ const TOOLS = [
 const handlers = {};
 
 // #1 read_state
-handlers.read_state = (_args) => {
+handlers.read_state = (args) => {
   sessionToolsCalled.add("read_state");
   const state = readState();
   // 清理过期信号
   if (state.signals) state.signals = cleanExpiredSignals(state.signals);
   const reminders = buildReminders(state);
-  const result = { ok: true, state };
+  const projection = args && Array.isArray(args.projection) && args.projection.length > 0 ? args.projection : null;
+  const payload = projection ? projectState(state, projection) : state;
+  const result = { ok: true, state: payload };
+  if (projection) result.projection_applied = projection;
   if (reminders.length > 0) result.reminders = reminders;
   return result;
 };
@@ -637,6 +819,15 @@ handlers.update_state = (args) => {
 
   // 深度合并
   const merged = deepMerge(current, patch);
+
+  // 自动镜像 health-log（在剥 _reason 之前算）
+  const mirrorEvents = mirrorHealthLog(patch, current, merged);
+  for (const ev of mirrorEvents) appendLine(HEALTH_LOG_PATH, JSON.stringify(ev));
+
+  // 剥离 user_state._reason 透传字段，避免污染 state
+  if (merged.user_state && Object.prototype.hasOwnProperty.call(merged.user_state, "_reason")) {
+    delete merged.user_state._reason;
+  }
 
   // alert_hr 自动重算
   if (merged.profile) {
@@ -705,7 +896,12 @@ handlers.update_state = (args) => {
     writeJSON(STATE_PATH, merged);
   }
 
-  return { ok: true, state: merged };
+  const result = {
+    ok: true,
+    changed_keys: topLevelChangedKeys(patch)
+  };
+  if (mirrorEvents.length > 0) result.mirrored_events = mirrorEvents.map(e => e.type);
+  return result;
 };
 
 // #4 write_daily_log
@@ -725,13 +921,23 @@ handlers.append_health_log = (args) => {
   }
   // scene_end / profile_update 由 MCP Server 自动追加，拒绝手动写入防止重复
   if (event.type === "scene_end") {
-    return { error: "scene_end 由 update_state({last_scene:{name,status,ts,summary}}) 自动写入，不要手动调用" };
+    return { ok: false, error: "scene_end 由 update_state({last_scene:{name,status,ts,summary}}) 自动写入，不要手动调用" };
   }
   if (event.type === "profile_update") {
-    return { error: "profile_update 由 update_state(profile 变更) 自动写入，不要手动调用" };
+    return { ok: false, error: "profile_update 由 update_state(profile 变更) 自动写入，不要手动调用" };
   }
-  if (!event.date) return { error: "event.date 必填" };
-  if (!event.ts) return { error: "event.ts 必填" };
+  // signal/status_change/session/rest_day 由 update_state 自动镜像
+  if (AUTO_MIRRORED_EVENT_TYPES.has(event.type)) {
+    const hint = {
+      signal: "改用 update_state({patch:{signals:{body:[...old, {type, detail, ts, severity?}]}}})",
+      status_change: "改用 update_state({patch:{user_state:{status, since, _reason?}}})；reason 写在 user_state._reason，写完会被 Server 剥离不入 state",
+      session: "改用 update_state({patch:{training_state:{recent_sessions:[新条, ...旧条]}}})",
+      rest_day: "改用 update_state({patch:{training_state:{consecutive_rest_days: <旧值+1>, consecutive_training_days:0}}})"
+    };
+    return { ok: false, error: `${event.type} 由 update_state 自动镜像，不要手动 append_health_log。${hint[event.type]}` };
+  }
+  if (!event.date) return { ok: false, error: "event.date 必填" };
+  if (!event.ts) return { ok: false, error: "event.ts 必填" };
   appendLine(HEALTH_LOG_PATH, JSON.stringify(event));
   return { ok: true };
 };
@@ -791,7 +997,11 @@ handlers.get_workout_log = (args) => {
     const limit = args.limit || 10;
     result = result.slice(0, limit);
   }
-  return { ok: true, sessions: result, source: "mock" };
+  const aggregate = aggregateSessions(result);
+  if (args.detail === true) {
+    return { ok: true, aggregate, sessions: result, source: "mock" };
+  }
+  return { ok: true, aggregate, source: "mock" };
 };
 
 // #8 set_body_data
@@ -809,12 +1019,11 @@ handlers.set_body_data = (args) => {
 // #9 get_health_summary
 handlers.get_health_summary = (args) => {
   // mock 实现——真实版通过 HTTP 桥从 HealthKit 拉取
-  return {
-    ok: true,
-    period: { start: args.start_date || today(), end: args.end_date || today() },
-    latest: healthSummary,
-    source: "mock"
-  };
+  const period = { start: args.start_date || today(), end: args.end_date || today() };
+  if (args.detail === true) {
+    return { ok: true, period, latest: healthSummary, source: "mock" };
+  }
+  return { ok: true, period, latest: summarizeHealth(healthSummary), source: "mock" };
 };
 
 // #10 get_session_live

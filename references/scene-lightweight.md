@@ -17,11 +17,13 @@
 ]
 ```
 
+> **自动镜像生效**：以下 §2/§3/§4 的 `update_state(signals.body push)` / `update_state(training_state.consecutive_rest_days)` / `update_state(user_state.status 变化)` 自动写对应 health-log 事件，**已删去手动 append_health_log 节点**。
+
 **§2 signal_capture_chat**：
 
 ```json
 [
-  {"id":"s1_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
   {"id":"s2_write_daily_log","tool":"write_daily_log"},
   {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
@@ -31,10 +33,9 @@
 
 ```json
 [
-  {"id":"s1_rest_log","tool":"append_health_log","match":{"event_type":"rest_day"}},
-  {"id":"s2_training_state","tool":"update_state","match":{"patch":"training_state"}},
-  {"id":"s3_write_daily_log","tool":"write_daily_log"},
-  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s1_training_state","tool":"update_state","match":{"patch":"training_state"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -42,10 +43,9 @@
 
 ```json
 [
-  {"id":"s1_status_log","tool":"append_health_log","match":{"event_type":"status_change"}},
-  {"id":"s2_user_state","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s3_write_daily_log","tool":"write_daily_log"},
-  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
+  {"id":"s2_write_daily_log","tool":"write_daily_log"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -58,7 +58,7 @@
 ]
 ```
 
-- status_change 若涉及受伤，同时在 s2 之前增加一节点 `{"id":"s1b_profile_injuries","tool":"update_state","match":{"patch":"profile"}}`。
+- status_change 若涉及受伤，同时在 s2 之前增加一节点 `{"id":"s1b_profile_injuries","tool":"update_state","match":{"patch":"profile"}}`（追加 `profile.injuries`）。
 - user_correction 若需下发新计划，插入 `{"id":"s0a_set_workout_plan","tool":"set_workout_plan"}` + `{"id":"s0b_show_report","tool":"show_report","match":{"report_type":"training_plan"}}` 到 s1 之前。
 
 ---
@@ -91,7 +91,8 @@ read_state
 
 ```
 read_state
-→ append_health_log({event:{type:"signal", signal_type:"<weight|body_fat|...>", value:<number>, unit:"<kg|%|bpm|cm>", ts:<now>}})
+→ update_state({patch:{signals:{body:[...<旧条目>, {type:"<weight|body_fat|...>", detail:"<value><unit>", ts:<now>}]}}})
+   // → 自动镜像 signal 事件到 health-log
 → update_state({patch:{profile:{basic_info:{weight_kg:...}}}}) // 仅当确实需要长期更新 profile 时
 → update_state(last_scene={name:"signal_capture_chat", status:"done", summary:"记录 <signal_type>=<value>"})
 → write_daily_log({content:"## 信号采集\n- <signal_type>: <value><unit>"})
@@ -109,11 +110,11 @@ read_state
 
 ```
 read_state
-→ append_health_log({event:{type:"rest_day", date:"<stage_date>", ts:"<stage_date>T08:00:00+08:00"}})
 → update_state({patch:{training_state:{
     consecutive_rest_days: <before+1>,
     consecutive_training_days: 0
   }}})
+   // → consecutive_rest_days N→N+1 自动镜像 rest_day 事件到 health-log
 → update_state(last_scene={name:"rest_day", status:"done", summary:"主动休息，连续休息 <n> 天"})
 → write_daily_log({content:"## 休息日\n- 主动选择休息"})
 ```
@@ -136,8 +137,8 @@ read_state
 
 ```
 read_state
-→ append_health_log({event:{type:"status_change", from:"<before>", to:"<after>", reason:"<用户描述>", ts:<now>}})
-→ update_state({patch:{user_state:{status:"<after>", since:"<stage_date>"}}})
+→ update_state({patch:{user_state:{status:"<after>", since:"<stage_date>", _reason:"<用户描述>"}}})
+   // → 自动镜像 status_change 事件（_reason 被消费后剥离，不写入 state）
 → update_state(last_scene={name:"status_change", status:"done", summary:"<before> → <after>"})
 → write_daily_log({content:"## 状态变更\n- <before> → <after>\n- 说明: <reason>"})
 ```

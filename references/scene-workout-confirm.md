@@ -46,7 +46,7 @@
 **生成训练计划前必须调用 `read_state`**——Step 0 已经调过，这一步只是提醒：你现在拿到的 `recent_sessions` 是写计划的核心输入。如果近 7 天数据不够（`recent_sessions` 长度 < 5 且 `consecutive_rest_days` 不足以解释），可以再调一次：
 
 ```
-get_workout_log({ filter_type: "recent", limit: 10 })
+get_workout_log({ filter_type: "recent", limit: 10, detail: true })  // 写计划需要逐条 session 细节，必须开 detail
 ```
 
 > 如果 `set_workout_plan` 返回 `warning: missing_recent_context`，**立即停下来**补 `read_state`/`get_workout_log` 后重新调用。MCP Server 的这个 warning 是模型违反规则的硬证据。

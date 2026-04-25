@@ -74,7 +74,7 @@ get_health_summary({ start_date: <yesterday>, end_date: <today> })
 返回过去 24h 的睡眠 / HRV / 静息心率。
 
 ```
-get_workout_log({ filter_type: "by_date", date: <today> })
+get_workout_log({ filter_type: "by_date", date: <today>, detail: true })  // 日报需要逐条 session 摘要
 ```
 
 返回今天发生的所有 session（可能为空）。

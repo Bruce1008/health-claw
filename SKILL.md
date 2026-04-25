@@ -21,10 +21,23 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 
 ### 必须
 
-- 进入任何场景前必须 `read_state`，**即使本会话内已读过**。上一个场景可能已经修改了 state，缓存的旧值会让安全护栏失效。
+- 进入任何场景前必须 `read_state`，**即使本会话内已读过**。上一个场景可能已经修改了 state，缓存的旧值会让安全护栏失效。`read_state({projection:[...]})` 可按 dot-path 裁剪返回字段省 token，`pending_nodes` 始终下发。
 - `read_state` 是 MCP 工具，**不是**内置 `read`；两者不可互换。除非读取 reference 文档且显式提供 `path`，否则**禁止**调用内置 `read`。
 - **每个场景必须先声明节点清单**（`update_state({patch:{pending_nodes:[...]}})`），再执行。节点清单在对应 `references/scene-*.md` 开头给出。详见 §3。
 - 工具调用错误（含 `ok: false` 返回 / `isError: true`）必须立即中断当前场景，写 `last_scene.status = "error"`，不要继续往下做。
+
+### health-log 自动镜像（禁止手写镜像类型）
+
+`update_state` 在以下 patch 模式下会**自动**追加对应 health-log 事件，**禁止**模型再手动 `append_health_log` 写这些类型：
+
+| patch 形态 | 自动镜像事件 | 模型怎么传 reason / severity 等附加字段 |
+|---|---|---|
+| `signals.body` 数组新增项 | `signal` | 在 push 的条目里直接带 `severity` 字段 |
+| `user_state.status` 与旧值不同 | `status_change`（含 from/to） | `user_state._reason` 透传字段，写入后 Server 自动剥离 |
+| `training_state.recent_sessions` 数组新增项 | `session`（session 字段为整个新条目） | 直接放在新增的 session 对象里 |
+| `training_state.consecutive_rest_days` 由 N → N+1 | `rest_day` | — |
+
+`scene_end` / `profile_update` 也由 Server 自动写入，禁止手动写（旧规则不变）。`append_health_log` 仅用于无对应 state 字段的事件类型（目前实际只剩 `body_data`，由 `set_body_data` 内部触发）。
 
 ### request_user_input 的 target 选择
 

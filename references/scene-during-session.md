@@ -9,14 +9,15 @@
 
 `read_state` + 分支分类后声明对应的一份。**三个 stop 分支（1.A 高、1.B、1.C critical）不含 close 节点**——`control_session(stop)` 会清空 pending_nodes，由 post-session 另行声明自己的清单。
 
+> **自动镜像生效**：`update_state(signals.body push)` 自动写 `signal` 事件、`update_state(user_state.status 变化)` 自动写 `status_change` 事件——以下清单**已删去**手动 append_health_log 节点，禁止再补回。
+
 **1.A 低/中严重度**（疼痛轻，不停训）：
 
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
-  {"id":"s3_notify","tool":"send_notification"},
-  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_notify","tool":"send_notification"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -25,10 +26,8 @@
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
-  {"id":"s3_status_change","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s4_status_log","tool":"append_health_log","match":{"event_type":"status_change"}},
-  {"id":"s5_stop","tool":"control_session","match":{"action":"stop"}}
+  {"id":"s2_user_state","tool":"update_state","match":{"patch":"user_state"}},
+  {"id":"s3_stop","tool":"control_session","match":{"action":"stop"}}
 ]
 ```
 
@@ -45,8 +44,7 @@
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
-  {"id":"s3_stop","tool":"control_session","match":{"action":"stop"}}
+  {"id":"s2_stop","tool":"control_session","match":{"action":"stop"}}
 ]
 ```
 
@@ -55,9 +53,8 @@
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
-  {"id":"s3_notify","tool":"send_notification"},
-  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_notify","tool":"send_notification"},
+  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -90,14 +87,11 @@ Step 0 命中 blocked（`active_session == null`）时直接写 `last_scene.stat
 update_state({
   patch: {
     signals: {
-      body: [...<旧条目>, { type: "pain", detail: <用户原话>, ts: <now> }]
+      body: [...<旧条目>, { type: "pain", detail: <用户原话>, ts: <now>, severity: "<low|medium|high>" }]
     }
   }
 })
-
-append_health_log({
-  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: <用户原话>, severity: "<low|medium|high>" }
-})
+// → 自动镜像 signal 事件到 health-log，不要再手动 append_health_log
 ```
 
 3. 按严重度决定下一步：
@@ -115,13 +109,10 @@ send_notification({ target: "watch", body: "记录了，建议降低强度。要
 ```
 update_state({
   patch: {
-    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天> }
+    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天>, _reason: <用户原话> }
   }
 })
-
-append_health_log({
-  event: { type: "status_change", date: <today>, ts: <now>, from: "available", to: "<injured|sick>", reason: <用户原话> }
-})
+// → 自动镜像 status_change 事件（_reason 字段被消费后自动剥离，不会落入 state）
 
 control_session({ action: "stop" })
 ```
@@ -148,13 +139,10 @@ control_session({ action: "stop" })
 ```
 update_state({
   patch: {
-    signals: { body: [...<旧条目>, { type: "hr_critical", detail: "心率超过 critical 持续 10 秒+", ts: <now> }] }
+    signals: { body: [...<旧条目>, { type: "hr_critical", detail: "心率超过 critical 持续 10 秒+", ts: <now>, severity: "high" }] }
   }
 })
-
-append_health_log({
-  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: "hr_critical 持续 10s+", severity: "high" }
-})
+// → 自动镜像 signal 事件
 
 control_session({ action: "stop" })
 ```
@@ -166,13 +154,10 @@ control_session({ action: "stop" })
 ```
 update_state({
   patch: {
-    signals: { body: [...<旧条目>, { type: "hr_warning", detail: "心率偏高持续 30 秒", ts: <now> }] }
+    signals: { body: [...<旧条目>, { type: "hr_warning", detail: "心率偏高持续 30 秒", ts: <now>, severity: "medium" }] }
   }
 })
-
-append_health_log({
-  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: "hr_warning 持续 30s", severity: "medium" }
-})
+// → 自动镜像 signal 事件
 
 send_notification({ target: "watch", body: "心率偏高，注意节奏" })
 ```

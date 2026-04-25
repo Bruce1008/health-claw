@@ -11,10 +11,9 @@
 ```json
 [
   {"id":"s1_training_state","tool":"update_state","match":{"patch":"training_state"}},
-  {"id":"s2_session_log","tool":"append_health_log","match":{"event_type":"session"}},
-  {"id":"s3_show_report","tool":"show_report","match":{"report_type":"post_session"}},
-  {"id":"s4_write_daily_log","tool":"write_daily_log"},
-  {"id":"s5_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_show_report","tool":"show_report","match":{"report_type":"post_session"}},
+  {"id":"s3_write_daily_log","tool":"write_daily_log"},
+  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -110,26 +109,11 @@ update_state({
 
 → MCP Server 会自动重算 `alert_hr` 并写入。**不要自己算 alert_hr**。
 
-## Step 5：写 health-log
+## Step 5：health-log 自动镜像
 
-```
-append_health_log({
-  event: {
-    type: "session",
-    date: <today>,
-    ts: <now>,
-    session: <Step 1 的快照, 完整记录>
-  }
-})
-```
+Step 3 的 `update_state(training_state.recent_sessions push)` **自动镜像 session 事件**到 health-log，**不要手动 append_health_log**。
 
-如果 user_state 在 during-session 中被改成了 `injured` 或 `sick`，再追加：
-
-```
-append_health_log({
-  event: { type: "status_change", date: <today>, ts: <now>, from: "available", to: "injured", reason: "<原因>" }
-})
-```
+`status_change` 事件已在 during-session 中通过 `update_state(user_state.status + _reason)` 自动镜像，post-session 不重复写。
 
 ## Step 6：show_report 复盘
 
@@ -196,7 +180,7 @@ update_state({
 | `get_session_live` 返回 `{ active: false }` 且没有 last_session 数据 | 至少写 `last_scene = { name: "post_session", status: "needs_context" }`，告诉用户"今天的运动数据没拿到，要不要手动告诉我练了什么"，然后让用户用对话补 |
 | user_state 被改成 `injured` | recent_sessions 里的 intensity 强制为 `low`（无论实际多重）；fatigue_estimate 强制为 `high`；写 status_change 事件 |
 | 用户提前结束（pause 后 stop） | `completion: "partial"`，正常走 Step 1-8 |
-| 训练中被心率 critical 强制停 | `completion: "partial"`，`analysis` 开头点明"本次因心率告警中止, 实际训练 X 分钟"，并在 Step 5 追加 `signal` 事件 |
+| 训练中被心率 critical 强制停 | `completion: "partial"`，`analysis` 开头点明"本次因心率告警中止, 实际训练 X 分钟"；signal 事件已由 during-session 的 `update_state(signals.body push)` 自动镜像 |
 
 ---
 

@@ -16,7 +16,18 @@ state.json
 
 **写入方式：** 全部通过 `update_state({patch: {...}})` 深度合并。**数组字段整体替换**，不追加——模型必须传完整新数组。
 
-**读取方式：** `read_state()` 返回完整结构 + 附加 `reminders` 数组（见末尾）。
+**读取方式：** `read_state()` 返回完整结构 + 附加 `reminders` 数组（见末尾）。`read_state({projection:["user_state","profile.basic_info",...]})` 按 dot-path 裁剪只返回需要的字段，`pending_nodes` 始终保留。
+
+**health-log 自动镜像：** 以下字段写入会触发 Server 自动追加 `health-log.jsonl` 事件，模型**禁止**再手动 `append_health_log` 写对应类型：
+
+| 字段 | 触发条件 | 镜像事件类型 |
+|---|---|---|
+| `signals.body` | 数组新增条目（去重 by ts+type+detail） | `signal` |
+| `user_state.status` | 与旧值不同 | `status_change`（reason 取自 `user_state._reason` 透传字段，写入后剥离） |
+| `training_state.recent_sessions` | 数组新增条目（去重 by date+type+duration_min） | `session` |
+| `training_state.consecutive_rest_days` | 由 N → N+1 | `rest_day` |
+| `last_scene` | name+status 写入 | `scene_end`（旧规则） |
+| `profile` | 任一字段变化（_meta/alert_hr 除外） | `profile_update`（旧规则） |
 
 ---
 

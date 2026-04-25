@@ -10,16 +10,17 @@
 
 Step 0 分类后，按命中分支声明对应的一份：
 
+> **自动镜像生效**：`update_state(user_state.status 变化)` 自动写 `status_change` 事件、`update_state(signals.body push)` 自动写 `signal` 事件——以下清单**已删去**手动 append_health_log 节点。
+
 **2.A 高严重度**（pain_strong / dizziness）：
 
 ```json
 [
   {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
-  {"id":"s3_status_log","tool":"append_health_log","match":{"event_type":"status_change"}},
-  {"id":"s4_notify","tool":"send_notification"},
-  {"id":"s5_write_daily_log","tool":"write_daily_log"},
-  {"id":"s6_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_signal_state","tool":"update_state","match":{"patch":"signals"}},
+  {"id":"s3_notify","tool":"send_notification"},
+  {"id":"s4_write_daily_log","tool":"write_daily_log"},
+  {"id":"s5_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -28,10 +29,9 @@ Step 0 分类后，按命中分支声明对应的一份：
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
-  {"id":"s3_notify","tool":"send_notification"},
-  {"id":"s4_write_daily_log","tool":"write_daily_log"},
-  {"id":"s5_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_notify","tool":"send_notification"},
+  {"id":"s3_write_daily_log","tool":"write_daily_log"},
+  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
 ```
 
@@ -39,7 +39,7 @@ Step 0 分类后，按命中分支声明对应的一份：
 
 ```json
 [
-  {"id":"s1_signal_log","tool":"append_health_log","match":{"event_type":"signal"}},
+  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
   {"id":"s2_write_daily_log","tool":"write_daily_log"},
   {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
 ]
@@ -82,18 +82,11 @@ Step 1 去重命中（今日已有同类 signal）/ `active_session != null`（r
 ```
 update_state({
   patch: {
-    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天> },
-    signals: { body: [...<旧条目>, { type: "<pain|dizziness>", detail: <用户原话>, ts: <now> }] }
+    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天>, _reason: <用户原话> },
+    signals: { body: [...<旧条目>, { type: "<pain|dizziness>", detail: <用户原话>, ts: <now>, severity: "high" }] }
   }
 })
-
-append_health_log({
-  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: <用户原话>, severity: "high" }
-})
-
-append_health_log({
-  event: { type: "status_change", date: <today>, ts: <now>, from: "<旧 status>", to: "<injured|sick>", reason: <用户原话> }
-})
+// → 自动镜像 status_change（_reason 被消费后剥离）+ signal 两个事件
 
 send_notification({
   title: "建议休息",
@@ -113,13 +106,10 @@ send_notification({
 ```
 update_state({
   patch: {
-    signals: { body: [...<旧条目>, { type: "pain", detail: <用户原话>, ts: <now> }] }
+    signals: { body: [...<旧条目>, { type: "pain", detail: <用户原话>, ts: <now>, severity: "medium" }] }
   }
 })
-
-append_health_log({
-  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: <用户原话>, severity: "medium" }
-})
+// → 自动镜像 signal 事件
 
 send_notification({
   title: "记录了",
@@ -130,12 +120,15 @@ send_notification({
 
 ### 2.C：信号堆积（signal_overload）
 
-不发实时通知（避免打扰），把"本周信号偏多，建议安排休息"作为提示**留给下一次 readiness 或 daily_report 场景**附带提一句。本场景只追加日志：
+不发实时通知（避免打扰），把"本周信号偏多，建议安排休息"作为提示**留给下一次 readiness 或 daily_report 场景**附带提一句。本场景只追加 signal 标记：
 
 ```
-append_health_log({
-  event: { type: "signal", date: <today>, ts: <now>, category: "body", detail: "signal_overload: 本周累计 N 条 signal", severity: "medium" }
+update_state({
+  patch: {
+    signals: { body: [...<旧条目>, { type: "signal_overload", detail: "本周累计 N 条 signal", ts: <now>, severity: "medium" }] }
+  }
 })
+// → 自动镜像 signal 事件
 ```
 
 ## Step 3：出口
