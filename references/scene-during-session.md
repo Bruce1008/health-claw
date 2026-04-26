@@ -17,7 +17,7 @@
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
   {"id":"s2_notify","tool":"send_notification"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -54,11 +54,11 @@
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
   {"id":"s2_notify","tool":"send_notification"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
-Step 0 命中 blocked（`active_session == null`）时直接写 `last_scene.status = "blocked"`，**不声明 pending_nodes**。
+Step 0 命中 blocked（`active_session == null`）时直接调 `finish_scene({status:"blocked"})`，**不声明 pending_nodes**。
 
 ## 核心原则：训练中 OpenClaw 尽量不参与
 
@@ -74,7 +74,7 @@ Step 0 命中 blocked（`active_session == null`）时直接写 `last_scene.stat
 ## Step 0：前置检查
 
 1. `read_state`
-2. 若 `state.active_session == null` → 事件不对应任何进行中的 session → 写 `last_scene = { name: "during_session", status: "blocked", ts: <now>, summary: "无进行中 session" }`，停手。
+2. 若 `state.active_session == null` → 事件不对应任何进行中的 session → 调 `finish_scene({ name: "during_session", status: "blocked", summary: "无进行中 session" })`，停手。
 
 ## Step 1：分支处理（三选一）
 
@@ -102,7 +102,7 @@ update_state({
 send_notification({ target: "watch", body: "记录了，建议降低强度。要继续吗？" })
 ```
 
-出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "pain_mild 已记录" }`。
+出口调 `finish_scene({ name: "during_session", status: "done", summary: "pain_mild 已记录" })`。
 
 **高**（"很痛"、"剧痛"、"拉伤了"、"动不了"、"头晕"、"想吐"、"站不稳"）：
 
@@ -162,7 +162,7 @@ update_state({
 send_notification({ target: "watch", body: "心率偏高，注意节奏" })
 ```
 
-不强制停训，继续等后续事件。出口写 `last_scene = { name: "during_session", status: "done", ts: <now>, summary: "hr_warning 已记录" }`。
+不强制停训，继续等后续事件。出口调 `finish_scene({ name: "during_session", status: "done", summary: "hr_warning 已记录" })`。
 
 ## Step 2：关于"换一个 plan"的边界
 

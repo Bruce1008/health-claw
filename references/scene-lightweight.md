@@ -12,8 +12,7 @@
 
 ```json
 [
-  {"id":"s1_write_daily_log","tool":"write_daily_log"},
-  {"id":"s2_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s1_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -24,8 +23,7 @@
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -34,8 +32,7 @@
 ```json
 [
   {"id":"s1_training_state","tool":"update_state","match":{"patch":"training_state"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -44,8 +41,7 @@
 ```json
 [
   {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -53,8 +49,7 @@
 
 ```json
 [
-  {"id":"s1_write_daily_log","tool":"write_daily_log"},
-  {"id":"s2_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s1_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -72,8 +67,7 @@
 ```
 read_state
 → 简答（不编数据、不下计划、不做医学判断）
-→ update_state(last_scene={name:"chat", status:"done", summary:"<一句话话题>"})
-→ write_daily_log({content:"## 对话\n- <一句话摘要>"})
+→ finish_scene({name:"chat", status:"done", summary:"<一句话话题>", daily_log_content:"## 对话\n- <一句话摘要>"})
 ```
 
 不要：
@@ -94,8 +88,7 @@ read_state
 → update_state({patch:{signals:{body:[...<旧条目>, {type:"<weight|body_fat|...>", detail:"<value><unit>", ts:<now>}]}}})
    // → 自动镜像 signal 事件到 health-log
 → update_state({patch:{profile:{basic_info:{weight_kg:...}}}}) // 仅当确实需要长期更新 profile 时
-→ update_state(last_scene={name:"signal_capture_chat", status:"done", summary:"记录 <signal_type>=<value>"})
-→ write_daily_log({content:"## 信号采集\n- <signal_type>: <value><unit>"})
+→ finish_scene({name:"signal_capture_chat", status:"done", summary:"记录 <signal_type>=<value>", daily_log_content:"## 信号采集\n- <signal_type>: <value><unit>"})
 ```
 
 判断是否更新 profile：一次性"今天称了 73.5"不更新 profile；用户明确说"我的体重是 74"或连续多次上报稳定值时更新。
@@ -115,8 +108,7 @@ read_state
     consecutive_training_days: 0
   }}})
    // → consecutive_rest_days N→N+1 自动镜像 rest_day 事件到 health-log
-→ update_state(last_scene={name:"rest_day", status:"done", summary:"主动休息，连续休息 <n> 天"})
-→ write_daily_log({content:"## 休息日\n- 主动选择休息"})
+→ finish_scene({name:"rest_day", status:"done", summary:"主动休息，连续休息 <n> 天", daily_log_content:"## 休息日\n- 主动选择休息"})
 ```
 
 硬规则：
@@ -139,8 +131,7 @@ read_state
 read_state
 → update_state({patch:{user_state:{status:"<after>", since:"<stage_date>", _reason:"<用户描述>"}}})
    // → 自动镜像 status_change 事件（_reason 被消费后剥离，不写入 state）
-→ update_state(last_scene={name:"status_change", status:"done", summary:"<before> → <after>"})
-→ write_daily_log({content:"## 状态变更\n- <before> → <after>\n- 说明: <reason>"})
+→ finish_scene({name:"status_change", status:"done", summary:"<before> → <after>", daily_log_content:"## 状态变更\n- <before> → <after>\n- 说明: <reason>"})
 ```
 
 如果是"受伤"：
@@ -163,8 +154,7 @@ read_state
    (b) 长期偏好变更 → update_state({patch:{profile:{preferences:{...}}}}) 并整组替换数组
 → (如需) set_workout_plan({...})  // 生成修正后的训练计划
 → (如需) show_report({report_type:"training_plan", data:{...}})
-→ update_state(last_scene={name:"user_correction", status:"done", summary:"修正 <dim>: <before> → <after>"})
-→ write_daily_log({content:"## 计划修正\n- <dim>: <before> → <after>\n- 类型: <一次性|长期>"})
+→ finish_scene({name:"user_correction", status:"done", summary:"修正 <dim>: <before> → <after>", daily_log_content:"## 计划修正\n- <dim>: <before> → <after>\n- 类型: <一次性|长期>"})
 ```
 
 判断一次性 vs 长期（参考 SKILL.md §5）：

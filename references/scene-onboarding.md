@@ -2,7 +2,7 @@
 
 > 触发：收到 `请使用 skill:health-claw 完成 onboarding` 开头的 bulk prompt（来源于 App 前端表单提交）。
 
-> **Eval / 性能 note**：onboarding 包含 7 次 tool 调用（`update_state` ×2、`schedule_recurring` ×3–4、`get_health_summary`、`show_report`、`write_daily_log`），在 `kimi-code` provider 下单次耗时 350–600s。eval 环境跑本 stage 前 `export SEND_TIMEOUT=900`。
+> **Eval / 性能 note**：onboarding 包含 6 次 tool 调用（`update_state` ×1、`schedule_recurring` ×3–4、`get_health_summary`、`show_report`、`finish_scene`），在 `kimi-code` provider 下单次耗时 350–600s。eval 环境跑本 stage 前 `export SEND_TIMEOUT=900`。
 
 ## pending_nodes 清单
 
@@ -16,8 +16,7 @@
   {"id":"s4_cron_monthly","tool":"schedule_recurring","match":{"name":"monthly_report"}},
   {"id":"s4b_cron_reminder","tool":"schedule_recurring","match":{"name":"daily_workout_reminder"}},
   {"id":"s5_show_report","tool":"show_report","match":{"report_type":"readiness_assessment"}},
-  {"id":"s6_write_daily_log","tool":"write_daily_log"},
-  {"id":"s7_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s6_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -41,7 +40,7 @@
 
 调用 `read_state`：
 
-- 若 `profile.basic_info.age` 已存在 → onboarding 已经完成过。回复一句"已经初始化过了"，写 `last_scene = { name: "onboarding", status: "skipped" }`，**不再走后续步骤**。
+- 若 `profile.basic_info.age` 已存在 → onboarding 已经完成过。回复一句"已经初始化过了"，调 `finish_scene({ name: "onboarding", status: "skipped", summary: "已初始化过" })`，**不再走后续步骤**。
 - 若 `profile` 为空或缺 `basic_info.age` → 进入 Step 1。
 
 ## Step 1：写入 profile（一次性）
@@ -127,24 +126,16 @@ schedule_recurring({
 | `Fri 20:00` | `0 20 * * 5` |
 | 其他自定义 `<weekday> HH:MM` | 按相同规则拼接 |
 
-## Step 3：写入 last_scene + 日志
+## Step 3：finish_scene 收尾
 
 ```
-update_state({
-  patch: {
-    last_scene: {
-      name: "onboarding",
-      status: "done",
-      ts: <now ISO8601>,
-      summary: "Onboarding 完成. fitness_level=<Q3>, reminder_mode=<Q9>, injuries_count=<Q8 数量>"
-    }
-  }
+finish_scene({
+  name: "onboarding",
+  status: "done",
+  summary: "Onboarding 完成. fitness_level=<Q3>, reminder_mode=<Q9>, injuries_count=<Q8 数量>",
+  daily_log_content: "## Onboarding 完成\n\n- 年龄: <age>\n- 体能基础: <fitness_level>\n- 主要目标: <goal>\n- 提醒模式: <reminder_mode>\n- 已创建 cron: <列表>\n"
 })
-// MCP Server 会自动追加 scene_end 事件到 health-log.jsonl，模型不要手动调用 append_health_log。
-
-write_daily_log({
-  content: "## Onboarding 完成\n\n- 年龄: <age>\n- 体能基础: <fitness_level>\n- 主要目标: <goal>\n- 提醒模式: <reminder_mode>\n- 已创建 cron: <列表>\n"
-})
+// → 内部一次性完成 update_state(last_scene) + write_daily_log + 自动 scene_end 镜像
 ```
 
 ## Step 4：首次 readiness_assessment
@@ -178,8 +169,7 @@ show_report({
 
 1. 把已写入的 cron 全部 `cancel_scheduled` 删掉。
 2. 用 `update_state` 把 profile 改回空 / 删掉 user_state。
-3. `update_state({ patch: { last_scene: { name: "onboarding", status: "error", ts: <now>, summary: "<错误原因>" } } })`（MCP Server 自动写 scene_end 到 health-log）。
-4. `write_daily_log` 写失败摘要。
+3. `finish_scene({ name: "onboarding", status: "error", summary: "<错误原因>", daily_log_content: "<失败摘要>" })`——一次性完成 last_scene + daily_log + scene_end 镜像。
 
 App 前端收到 SSE 错误事件后会让用户重新点"完成"触发一次新的 bulk prompt。**禁止让用户半完成进入主流程**——profile 要么全写要么全空。**模型不要写"请重试"给用户**——交互在前端完成，本场景的职责到 last_scene = error 为止。
 

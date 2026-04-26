@@ -16,8 +16,7 @@
   {"id":"s2_show_report","tool":"show_report","match":{"report_type":"training_plan"}},
   {"id":"s3_set_alert_rules","tool":"set_alert_rules"},
   {"id":"s4_confirm","tool":"request_user_input"},
-  {"id":"s5_write_daily_log","tool":"write_daily_log"},
-  {"id":"s6_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s5_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -147,17 +146,16 @@ request_user_input({
 
 ## Step 6：落盘
 
-无论分支结果如何，出口都要写：
+无论分支结果如何，出口都要调：
 
 ```
-update_state({
-  patch: {
-    last_scene: { name: "workout_confirm", status: <...>, ts: <now>, summary: "<决策摘要>" }
-  }
+finish_scene({
+  name: "workout_confirm",
+  status: <done|skipped>,
+  summary: "<决策摘要>",
+  daily_log_content: "## 训练确认\n\n- 决策: <开始 / 换一个 / 跳过 / 过一会儿>\n- 计划: <摘要 或 ->\n"
 })
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
-
-write_daily_log({ content: "## 训练确认\n\n- 决策: <开始 / 换一个 / 跳过 / 过一会儿>\n- 计划: <摘要 或 ->\n" })
+// → 内部一次性完成 update_state(last_scene) + write_daily_log + 自动 scene_end 镜像
 ```
 
 如果决策是"开始"，则**不在本场景写 last_scene = done**——等 `scene-during-session` 和 `scene-post-session` 跑完再写。本场景只写 `last_scene = { name: "workout_confirm", status: "done" }` 表示"用户确认开始训练"。

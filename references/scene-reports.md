@@ -11,8 +11,7 @@
 ```json
 [
   {"id":"s1_show_report","tool":"show_report","match":{"report_type":"daily_report"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -21,8 +20,7 @@
 ```json
 [
   {"id":"s1_show_report","tool":"show_report","match":{"report_type":"weekly"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -31,8 +29,7 @@
 ```json
 [
   {"id":"s1_show_report","tool":"show_report","match":{"report_type":"monthly"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -119,13 +116,12 @@ get_workout_log({ filter_type: "by_date", date: <today>, detail: true })  // 日
 
 ```
 show_report({ report_type: "daily_report", data: { ... } })
-write_daily_log({ content: "## 日报\n\n<简短摘要>\n" })
-update_state({
-  patch: {
-    last_scene: { name: "daily_report", status: "done", ts: <now>, summary: "<一句话摘要>" }
-  }
+finish_scene({
+  name: "daily_report",
+  status: "done",
+  summary: "<一句话摘要>",
+  daily_log_content: "## 日报\n\n<简短摘要>\n"
 })
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 ### reminders 处理
@@ -219,13 +215,12 @@ get_health_summary({ start_date: <7天前>, end_date: <today> })
 
 ```
 show_report({ report_type: "weekly", data: { ... } })
-write_daily_log({ content: "## 周报\n\n<简短摘要>\n" })
-update_state({
-  patch: {
-    last_scene: { name: "weekly_report", status: "done", ts: <now>, summary: "<一句话摘要>" }
-  }
+finish_scene({
+  name: "weekly_report",
+  status: "done",
+  summary: "<一句话摘要>",
+  daily_log_content: "## 周报\n\n<简短摘要>\n"
 })
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 ### reminders 处理
@@ -343,17 +338,16 @@ query_health_log({ start_date: <月初>, end_date: <月末>, types: ["body_data"
 
 ```
 show_report({ report_type: "monthly", data: { ... } })
-write_daily_log({ content: "## 月报\n\n<简短摘要 + 下月方向>\n" })
 write_global_memory({
   target: "milestone",
   content: "## <YYYY-MM> 月度小结\n\n- 训练 <n> 次, <n> 分钟\n- 强度分布: high <n> / medium <n> / low <n>\n- goal: <goal>, alignment: <...>\n- fitness_level: <current>, trend: <...>\n"
 })
-update_state({
-  patch: {
-    last_scene: { name: "monthly_report", status: "done", ts: <now>, summary: "<一句话摘要>" }
-  }
+finish_scene({
+  name: "monthly_report",
+  status: "done",
+  summary: "<一句话摘要>",
+  daily_log_content: "## 月报\n\n<简短摘要 + 下月方向>\n"
 })
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
 ```
 
 > 月报是少数几个会写 `write_global_memory(target: "milestone")` 的场景——把每月关键数字 + 目标进展写进 MEMORY，便于以后回顾。

@@ -340,7 +340,7 @@ function deepMerge(target, source) {
 // 节点格式: { id, tool, match? }
 // match 可含:
 //   - patch: 字符串，要求 args.patch 里有该 key；特例：patch=="last_scene" 时还要求 status === "done"
-//   - report_type / name / action: 严格等值
+//   - report_type / name / action / status: 严格等值（status 用于 finish_scene 节点匹配）
 //   - event_type: args.event.type 严格等值
 function nodeMatches(node, toolName, args) {
   if (!node || node.tool !== toolName) return false;
@@ -354,6 +354,7 @@ function nodeMatches(node, toolName, args) {
   if (m.report_type !== undefined && (!args || args.report_type !== m.report_type)) return false;
   if (m.name !== undefined && (!args || args.name !== m.name)) return false;
   if (m.action !== undefined && (!args || args.action !== m.action)) return false;
+  if (m.status !== undefined && (!args || args.status !== m.status)) return false;
   if (m.event_type !== undefined) {
     const et = args && args.event && args.event.type;
     if (et !== m.event_type) return false;
@@ -464,8 +465,24 @@ const TOOLS = [
     }
   },
   {
+    name: "finish_scene",
+    description: "**场景收尾合并工具**：一次性写 last_scene + 当天 daily log（取代 update_state(last_scene) + write_daily_log 两次调用）。Server 自动追加 scene_end 事件到 health-log。daily_log_content 不传时按 summary 自动生成简短日志。**所有场景的最后一步都应改用本工具**。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "场景名，如 onboarding / readiness / workout_confirm / post_session / chat 等" },
+        status: { type: "string", enum: LAST_SCENE_STATUS_ENUM, description: "场景终态" },
+        summary: { type: "string", description: "一句话场景摘要" },
+        daily_log_content: { type: "string", description: "Markdown 日志正文；不传则按 summary 自动生成 `## <name>\\n\\n- <status>: <summary>`" },
+        ts: { type: "string", description: "ISO 时间戳，不传用 now" }
+      },
+      required: ["name", "status"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "write_daily_log",
-    description: "追加 markdown 到当天日志 logs/{date}.md",
+    description: "追加 markdown 到当天日志 logs/{date}.md。**场景收尾改用 finish_scene** —— 本工具仅用于跨场景或非场景上下文的额外落盘。",
     inputSchema: {
       type: "object",
       properties: {
@@ -735,8 +752,23 @@ const TOOLS = [
     }
   },
   {
+    name: "reschedule_recurring",
+    description: "**原子改 cron**：取代 cancel_scheduled + schedule_recurring 两步调用。内部按序：cancel(name) → schedule_recurring(name, new_cron, new_prompt)。cancel 失败时不创建新 cron（rolled_back:true）。**改 cron 一律用本工具**。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "要改动的 job name" },
+        new_cron: { type: "string", description: "新的 5/6 字段 cron 表达式" },
+        new_prompt: { type: "string", description: "新触发 prompt（必填，server 不缓存旧 prompt）" },
+        tz: { type: "string", description: "时区，默认系统时区" }
+      },
+      required: ["name", "new_cron", "new_prompt"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "cancel_scheduled",
-    description: "按 name 删除已注册的 cron job",
+    description: "按 name 删除已注册的 cron job。**改 cron 用 reschedule_recurring**——除非确实只想删除而不重建，否则不要单独调本工具。",
     inputSchema: {
       type: "object",
       properties: {
@@ -910,6 +942,39 @@ handlers.write_daily_log = (args) => {
   const logFile = path.join(LOGS_DIR, `${d}.md`);
   appendLine(logFile, args.content);
   return { ok: true, file: logFile };
+};
+
+// #4b finish_scene —— 场景收尾合并工具（取代 update_state(last_scene) + write_daily_log）
+handlers.finish_scene = (args) => {
+  const { name, status, summary = "", daily_log_content, ts } = args || {};
+  if (!name) return { ok: false, error: "name 必填" };
+  if (!status) return { ok: false, error: "status 必填" };
+  if (!LAST_SCENE_STATUS_ENUM.includes(status)) {
+    return { ok: false, error: `status 不合法: ${status}，允许值: ${LAST_SCENE_STATUS_ENUM.join("/")}` };
+  }
+
+  const sceneTs = ts || nowISO();
+
+  // 1. 通过 update_state 写 last_scene（复用枚举校验、scene_end 自动镜像、_meta 维护等逻辑）
+  const updateRes = handlers.update_state({
+    patch: { last_scene: { name, status, ts: sceneTs, summary } }
+  });
+  if (!updateRes || updateRes.ok === false || updateRes.error) {
+    return { ok: false, error: "update_last_scene_failed", detail: updateRes && (updateRes.error || updateRes), failed_step: "update_state" };
+  }
+
+  // 2. 写当天 daily log（缺省按 summary 自动生成）
+  const d = today();
+  const logFile = path.join(LOGS_DIR, `${d}.md`);
+  const content = daily_log_content || `## ${name}\n\n- 状态: ${status}\n- 摘要: ${summary || "(无)"}\n`;
+  appendLine(logFile, content);
+
+  return {
+    ok: true,
+    last_scene: { name, status, ts: sceneTs, summary },
+    log_file: logFile,
+    scene_end_logged: true
+  };
 };
 
 // #5 append_health_log
@@ -1212,6 +1277,42 @@ handlers.schedule_one_shot = (args) => {
       resolve({ ok: false, error: err.code === "ENOENT" ? "openclaw_cli_not_found" : err.message });
     });
   });
+};
+
+// #20b reschedule_recurring —— 原子改 cron（cancel + create 一次完成）
+handlers.reschedule_recurring = async (args) => {
+  if (!args || !args.name) return { ok: false, error: "name 必填" };
+  if (!args.new_cron) return { ok: false, error: "new_cron 必填" };
+  if (!args.new_prompt) return { ok: false, error: "new_prompt 必填（server 不缓存旧 prompt）" };
+  if (!/^[\d*\/,\-]+(\s[\d*\/,\-]+){4,5}$/.test(args.new_cron.trim())) {
+    return { ok: false, error: "new_cron 表达式格式不合法" };
+  }
+
+  // Step 1: cancel 旧 job
+  const cancelRes = await handlers.cancel_scheduled({ name: args.name });
+  if (!cancelRes.ok) {
+    return { ok: false, error: "cancel_failed", failed_step: "cancel_scheduled", detail: cancelRes.error, rolled_back: true };
+  }
+
+  // Step 2: create 新 job
+  const createRes = await handlers.schedule_recurring({
+    name: args.name,
+    cron: args.new_cron,
+    prompt: args.new_prompt,
+    tz: args.tz
+  });
+  if (!createRes.ok) {
+    return {
+      ok: false,
+      error: "create_failed",
+      failed_step: "schedule_recurring",
+      detail: createRes.error,
+      rolled_back: false,
+      hint: `原 cron "${args.name}" 已删除，新 cron 创建失败；请手动 schedule_recurring 恢复`
+    };
+  }
+
+  return { ok: true, name: args.name, new_cron: args.new_cron, tz: createRes.tz };
 };
 
 // #21 cancel_scheduled

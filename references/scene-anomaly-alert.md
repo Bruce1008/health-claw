@@ -19,8 +19,7 @@ Step 0 分类后，按命中分支声明对应的一份：
   {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
   {"id":"s2_signal_state","tool":"update_state","match":{"patch":"signals"}},
   {"id":"s3_notify","tool":"send_notification"},
-  {"id":"s4_write_daily_log","tool":"write_daily_log"},
-  {"id":"s5_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s4_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -30,8 +29,7 @@ Step 0 分类后，按命中分支声明对应的一份：
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
   {"id":"s2_notify","tool":"send_notification"},
-  {"id":"s3_write_daily_log","tool":"write_daily_log"},
-  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -40,8 +38,7 @@ Step 0 分类后，按命中分支声明对应的一份：
 ```json
 [
   {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -134,15 +131,11 @@ update_state({
 ## Step 3：出口
 
 ```
-update_state({
-  patch: {
-    last_scene: { name: "anomaly_alert", status: "done", ts: <now>, summary: "<异常类型>" }
-  }
-})
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
-
-write_daily_log({
-  content: "## 异常预警\n\n- 类型: <pain_strong|dizziness|pain_mild|signal_overload>\n- 严重度: <high|medium>\n- 处理: <updated_user_state|notify_only|log_only>\n- 用户状态: <user_state.status>\n"
+finish_scene({
+  name: "anomaly_alert",
+  status: "done",
+  summary: "<异常类型>",
+  daily_log_content: "## 异常预警\n\n- 类型: <pain_strong|dizziness|pain_mild|signal_overload>\n- 严重度: <high|medium>\n- 处理: <updated_user_state|notify_only|log_only>\n- 用户状态: <user_state.status>\n"
 })
 ```
 

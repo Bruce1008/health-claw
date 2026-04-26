@@ -245,11 +245,11 @@
 7. [x] ~~`references/state-schema.md`: 标注哪些字段写入会自动镜像~~ **已改**
 
 ### Phase 2（finish_scene + reschedule_recurring）
-1. [ ] `scripts/mcp-server.js`: 加 finish_scene handler + schema
-2. [ ] `scripts/mcp-server.js`: 加 reschedule_recurring handler + schema
-3. [ ] `references/scene-*.md`: 把 write_daily_log + update_state(last_scene) 改成 finish_scene
-4. [ ] `SKILL.md` §9: cron 调度边界改成 reschedule_recurring
-5. [ ] eval mock: 加 finish_scene/reschedule_recurring 的 mock
+1. [x] ~~`scripts/mcp-server.js`: 加 finish_scene handler + schema~~ **已改**
+2. [x] ~~`scripts/mcp-server.js`: 加 reschedule_recurring handler + schema~~ **已改**
+3. [x] ~~`references/scene-*.md`: 把 write_daily_log + update_state(last_scene) 改成 finish_scene~~ **已改**
+4. [x] ~~`SKILL.md` §9: cron 调度边界改成 reschedule_recurring~~ **已改**
+5. [ ] eval mock: 加 finish_scene/reschedule_recurring 的 mock — **未跟踪在 git repo（在 `health-claw其余文件/eval/`），跳过**
 
 ### Phase 3（Pattern A 复合工具，按风险从低到高）
 1. [ ] `record_rest_day`（最简单，验证设计模式）

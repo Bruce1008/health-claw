@@ -89,20 +89,21 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 
 | match 字段 | 含义 |
 |---|---|
-| `patch: "<key>"` | 要求 `args.patch.<key>` 存在。特例：`patch:"last_scene"` 仅当 `last_scene.status === "done"` 时才匹配（用于 close 节点） |
+| `patch: "<key>"` | 要求 `args.patch.<key>` 存在。特例：`patch:"last_scene"` 仅当 `last_scene.status === "done"` 时才匹配（旧 close 节点写法，新场景请改用 finish_scene 节点） |
 | `report_type: "<x>"` | `args.report_type === x` |
 | `name: "<x>"` | `args.name === x`（schedule_recurring） |
 | `action: "<x>"` | `args.action === x`（control_session） |
+| `status: "<x>"` | `args.status === x`（finish_scene close 节点用 `match:{status:"done"}`） |
 | `event_type: "<x>"` | `args.event.type === x`（append_health_log） |
 
 只读工具（`read_state` / `get_user_profile` / `get_health_summary` / `get_session_live` / `get_workout_log` / `query_health_log`）不消耗节点。
 
 ### 场景出口
 
-- **正常收尾**：清单里最后一个节点一定是 `{id:"...close_done", tool:"update_state", match:{patch:"last_scene"}}`。走完前面所有节点后，再 `update_state({patch:{last_scene:{name, status:"done", ts, summary}}})` 把 close 节点也弹空。pending_nodes 仍非空时 Server 返回 `cannot_close_done_with_pending_nodes`，必须补完。
-- **异常收尾**：`last_scene.status` 写 `blocked / needs_context / error / skipped` 任一，Server 会**自动清空** pending_nodes。
+- **正常收尾**：清单里最后一个节点一定是 `{id:"...finish", tool:"finish_scene", match:{status:"done"}}`。走完前面所有节点后调 `finish_scene({name, status:"done", summary, daily_log_content?})` 弹空 close 节点。pending_nodes 仍非空时 Server 返回 `cannot_close_done_with_pending_nodes`，必须补完。**`finish_scene` 取代旧 `update_state(last_scene) + write_daily_log` 两步**——一次调用完成 last_scene 写入、daily log 落盘、scene_end 自动镜像。
+- **异常收尾**：`finish_scene({status:"blocked|needs_context|error|skipped", ...})` 任一终态，Server 会**自动清空** pending_nodes。
 - `control_session({action:"stop"})` 会同时清空 pending_nodes，作为 during-session → post-session 的跨场景 handoff。
-- MCP Server 在 `update_state` 写入 last_scene 时自动追加 `scene_end` 事件到 health-log，**禁止**手动 `append_health_log({type:"scene_end"})`。
+- MCP Server 在 last_scene 写入时自动追加 `scene_end` 事件到 health-log（无论走 `finish_scene` 还是直接 `update_state`），**禁止**手动 `append_health_log({type:"scene_end"})`。
 
 ### last_scene.status 五选一
 
@@ -175,7 +176,7 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 
 ## 9. cron 调度边界
 
-- 创建/删除 cron job 只能通过 `schedule_recurring` / `schedule_one_shot` / `cancel_scheduled` 三个工具，**不要尝试**直接读写任何 cron 配置文件。
+- 创建/删除/改 cron job 只能通过 `schedule_recurring` / `schedule_one_shot` / `cancel_scheduled` / `reschedule_recurring` 四个工具，**不要尝试**直接读写任何 cron 配置文件。
 - onboarding 场景固定创建 3 个（日报/周报/月报）+ 条件创建 1 个（定时运动提醒），详见 `references/scene-onboarding.md`。
-- 用户需要更改日报汇报时间 → **先 `cancel_scheduled({name:"daily_report"})` 再 `schedule_recurring`**，不要试图"修改"已存在的 job。
-- 用户在训练确认场景点表达“等一下”或"过一会儿"等意思时 → 用 `schedule_one_shot({delay:"30m", prompt:"..."})`，30 分钟后由 cron 重新触发训练确认场景；**不要在前端做倒计时缓存重发**。
+- 用户需要更改已有 cron 时间或 prompt → **一律用 `reschedule_recurring({name, new_cron, new_prompt})`**，原子完成 cancel + 重建；不要再手动连调 `cancel_scheduled` + `schedule_recurring`，也不要试图"修改"已存在的 job。
+- 用户在训练确认场景表达"等一下"或"过一会儿"等意思时 → 用 `schedule_one_shot({delay:"30m", prompt:"..."})`，30 分钟后由 cron 重新触发训练确认场景；**不要在前端做倒计时缓存重发**。

@@ -13,8 +13,7 @@
 ```json
 [
   {"id":"s1_show_report","tool":"show_report","match":{"report_type":"readiness_assessment"}},
-  {"id":"s2_write_daily_log","tool":"write_daily_log"},
-  {"id":"s3_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -108,19 +107,16 @@ show_report({
 })
 ```
 
-写日志 + last_scene：
+finish_scene 收尾：
 
 ```
-write_daily_log({
-  content: "## 状态评估\n\n- overall: <...>\n- 摘要: <一句话>\n- 建议方向: <列表>\n"
+finish_scene({
+  name: "readiness",
+  status: "done",
+  summary: "overall=<...>",
+  daily_log_content: "## 状态评估\n\n- overall: <...>\n- 摘要: <一句话>\n- 建议方向: <列表>\n"
 })
-
-update_state({
-  patch: {
-    last_scene: { name: "readiness", status: "done", ts: <now>, summary: "overall=<...>" }
-  }
-})
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
+// → 内部一次性完成 update_state(last_scene) + write_daily_log + 自动 scene_end 镜像
 ```
 
 ---

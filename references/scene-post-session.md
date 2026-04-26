@@ -12,8 +12,7 @@
 [
   {"id":"s1_training_state","tool":"update_state","match":{"patch":"training_state"}},
   {"id":"s2_show_report","tool":"show_report","match":{"report_type":"post_session"}},
-  {"id":"s3_write_daily_log","tool":"write_daily_log"},
-  {"id":"s4_close_done","tool":"update_state","match":{"patch":"last_scene"}}
+  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
 ]
 ```
 
@@ -156,19 +155,16 @@ show_report({
 
 是建议不是要求。**用户拒绝绝对不再追问**。
 
-## Step 8：写日志 + last_scene
+## Step 8：finish_scene 收尾
 
 ```
-write_daily_log({
-  content: "## 训练复盘\n\n- 类型: <type>\n- 时长: <duration_min> 分钟\n- 强度: <intensity>\n- 评估方向: <summary>\n- 下次检查: <next_check_in>\n"
+finish_scene({
+  name: "post_session",
+  status: "done",
+  summary: "<一句话>",
+  daily_log_content: "## 训练复盘\n\n- 类型: <type>\n- 时长: <duration_min> 分钟\n- 强度: <intensity>\n- 评估方向: <summary>\n- 下次检查: <next_check_in>\n"
 })
-
-update_state({
-  patch: {
-    last_scene: { name: "post_session", status: "done", ts: <now>, summary: "<一句话>" }
-  }
-})
-// MCP Server 自动追加 scene_end 到 health-log.jsonl。
+// → 内部一次性完成 update_state(last_scene) + write_daily_log + 自动 scene_end 镜像
 ```
 
 ---
