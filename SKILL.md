@@ -71,6 +71,28 @@ description: 个人私教 skill。采集健康/运动数据，评估身体状态
 
 ---
 
+## 2.5 复合工具速查表（Phase 3 Pattern A）
+
+下列工具**首选用于对应场景**——每个内部一次性走完该场景的所有写入 + 通知 + finish_scene。**模型只需调 1 次**，禁止再手动重复内部步骤。
+
+| 工具 | 适用场景 | 内部做了什么 | 节点数压缩 |
+|---|---|---|---|
+| `setup_onboarding(bulk)` | onboarding | profile + cron x3-4 + health_summary + readiness_assessment + finish_scene；任一步失败原子回滚 | 7 → 1 |
+| `record_rest_day({reason?})` | lightweight rest_day | training_state(rest_days+1, training_days=0) → 自动镜像 rest_day + finish_scene | 4 → 1 |
+| `record_signal({signal_type, detail, severity, notification_body?, scene_name?})` | anomaly 2.B 中、signal_overload | signals.body push → 自动镜像 signal + 可选 send_notification + finish_scene | 3-4 → 1 |
+| `record_body_data({weight_kg?, body_fat_pct?, ..., update_profile?})` | lightweight signal_capture_chat（可量化指标） | append_health_log(body_data) + 可选 update_state(profile.basic_info) + finish_scene | 4 → 1 |
+| `change_status({to, reason, since?, next_check?, injuries_patch?, notification_body?, scene_name?})` | lightweight status_change、anomaly 2.A 高 | user_state(+_reason) → 自动镜像 status_change + 可选 profile.injuries 整数组替换 + 可选 send_notification + finish_scene | 4-6 → 1 |
+| `record_session_event({signal_type, detail, severity, notification_body?})` | during-session 1.A 低/中、1.C warning | signals.body push → 自动镜像 signal + 可选 send_notification(watch) + finish_scene(during_session) | 4 → 1 |
+| `stop_session_with_signal({trigger, detail, severity, status_change?})` | during-session 1.A 高、1.B 用户停、1.C critical | signals.body push + 可选 user_state(+_reason) → 自动镜像 signal/status_change + control_session(stop)；**不调 finish_scene**，由 §3 特例规则 handoff 给 post-session | 5 → 1 |
+
+**复合工具 vs 拆开调**：复合工具是首选；只有当场景需要**该工具不支持的额外步骤**（如 user_correction 需要 set_workout_plan + show_report）时，才回退到拆开写法。
+
+**失败定位**：复合工具失败时返回 `{ok:false, failed_step:"<step>", error, rolled_back?}`。模型按 `failed_step` 决定如何告知用户，**不要再手动跑剩余步骤**。
+
+**禁止**手动重复内部步骤——例如调了 `record_rest_day` 后再 `update_state(training_state)` 或 `finish_scene` 都会被 server 拒（重复写、pending_nodes 已弹空）。
+
+---
+
 ## 3. 场景通用协议（pending_nodes 任务板）
 
 每个场景的闭环靠 `state.pending_nodes` 保证：在场景开始时把本场景必须完成的节点清单写进 state，MCP Server 会在每次非只读工具调用成功后自动弹出一个匹配节点；`last_scene.status = "done"` 在 pending_nodes 非空时会被 Server 拒绝。

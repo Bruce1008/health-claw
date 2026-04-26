@@ -2,29 +2,25 @@
 
 > 触发：收到 `请使用 skill:health-claw 完成 onboarding` 开头的 bulk prompt（来源于 App 前端表单提交）。
 
-> **Eval / 性能 note**：onboarding 包含 6 次 tool 调用（`update_state` ×1、`schedule_recurring` ×3–4、`get_health_summary`、`show_report`、`finish_scene`），在 `kimi-code` provider 下单次耗时 350–600s。eval 环境跑本 stage 前 `export SEND_TIMEOUT=900`。
+> **Phase 3 复合工具**：本场景全部步骤合并到 `setup_onboarding(bulk)` 1 次调用——server 内部按序写 profile/user_state/training_state、建 cron x3-4、拉 health_summary、show_report、finish_scene。任一步失败原子回滚。
+>
+> **Eval / 性能 note**：onboarding 现在仅 1 次模型 tool 调用（setup_onboarding），实际内部跑 7-8 步。eval 环境跑本 stage 前 `export SEND_TIMEOUT=900`（cron 创建串行慢）。
 
 ## pending_nodes 清单
 
-`read_state` 后先声明清单（按 SKILL.md §3）。基础 7 条必走；`reminder_mode == "scheduled"` 时在 s4 之后插入 `s4b_cron_reminder`：
+`read_state` 后只声明 1 个节点：
 
 ```json
 [
-  {"id":"s1_profile_write","tool":"update_state","match":{"patch":"profile"}},
-  {"id":"s2_cron_daily","tool":"schedule_recurring","match":{"name":"daily_report"}},
-  {"id":"s3_cron_weekly","tool":"schedule_recurring","match":{"name":"weekly_report"}},
-  {"id":"s4_cron_monthly","tool":"schedule_recurring","match":{"name":"monthly_report"}},
-  {"id":"s4b_cron_reminder","tool":"schedule_recurring","match":{"name":"daily_workout_reminder"}},
-  {"id":"s5_show_report","tool":"show_report","match":{"report_type":"readiness_assessment"}},
-  {"id":"s6_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_setup_onboarding","tool":"setup_onboarding"}
 ]
 ```
 
 硬规则：
 
-- 所有 cron 必须通过 `schedule_recurring` 建立；**不得**直接写 cron 配置文件。
-- Step 0 发现 onboarding 已完成（profile.basic_info.age 已存在）→ 直接写 `last_scene = { status: "skipped" }`，**不声明 pending_nodes**。
-- 失败回滚走 `last_scene.status = "error"`，Server 会自动清空 pending_nodes。
+- 所有 cron 都由 `setup_onboarding` 内部按 `bulk.reminder_mode` 决定数量（3 个或 4 个）；**不得**直接写 cron 配置文件，也不要再手动 `schedule_recurring`。
+- 已初始化（profile.basic_info.age 存在）→ server 自动返回 `{ok:true, skipped:true, reason:"already_initialized"}` 并 `finish_scene(skipped)`；模型不再需要前置检查。
+- 任一步失败 → server 自动 cancel 已建 cron + 清空 profile + finish_scene(error)，返回 `{ok:false, failed_step, rolled_back:true, cron_cancelled:[...]}`。模型只需读 `failed_step` 决定是否提示用户重试。
 
 ## 核心原则：一次性 bulk，无交互
 
@@ -40,138 +36,85 @@
 
 调用 `read_state`：
 
-- 若 `profile.basic_info.age` 已存在 → onboarding 已经完成过。回复一句"已经初始化过了"，调 `finish_scene({ name: "onboarding", status: "skipped", summary: "已初始化过" })`，**不再走后续步骤**。
-- 若 `profile` 为空或缺 `basic_info.age` → 进入 Step 1。
+- 若 `profile.basic_info.age` 已存在 → onboarding 已经完成过。直接进 Step 1（`setup_onboarding` 内部会自动检测 + 返回 `skipped`）。
+- 若 `profile` 为空 → 进 Step 1。
 
-## Step 1：写入 profile（一次性）
-
-用 `update_state` 把 bulk prompt 的 JSON 翻译成完整 patch，**单次调用**完成所有写入：
+## Step 1：调 `setup_onboarding(bulk)` —— 一次性走完全部
 
 ```
-update_state({
-  patch: {
-    user_state: { status: "available", since: <today>, next_check: null },
-    profile: {
-      basic_info: { age: <Q1>, gender: <Q2 映射: male|female|unspecified> },
-      goal: <Q4 或默认 "保持健康、规律运动">,
-      preferences: {
-        preferred_types: <Q5 数组 或 []>,
-        available_equipment: <Q6 数组 或 ["自重"]>,
-        training_time: <Q7 或 "不固定">,
-        reminder_mode: <Q9: scheduled|proactive>,
-        reminder_time: <Q9a: "HH:MM" 或 不传>,
-        weekly_report_time: <Q10 或 "Sun 20:00">
-      },
-      fitness_level: <Q3: beginner|intermediate|advanced>,
-      injuries: <数组; 见本文件"几个特殊细节"的 injuries 映射规则>,
-      max_hr_measured: null
-      // 不要手动算 alert_hr——MCP Server 会自动算并写入
+setup_onboarding({
+  bulk: {
+    basic_info: { age: <Q1>, gender: <Q2 映射: male|female|unspecified>, height_cm?, weight_kg? },
+    fitness_level: <Q3: beginner|intermediate|advanced>,
+    goal: <Q4 或默认 "保持健康、规律运动">,
+    preferences: {
+      preferred_types: <Q5 数组 或 []>,
+      available_equipment: <Q6 数组 或 ["自重"]>,
+      training_time: <Q7 或 "不固定">,
+      reminder_mode: <Q9: scheduled|proactive>,
+      reminder_time: <Q9a: "HH:MM" 或 不传>,
+      weekly_report_time: <Q10 或 "Sun 20:00">
     },
-    training_state: {
-      consecutive_training_days: 0,
-      consecutive_rest_days: 0,
-      recent_sessions: [],
-      fatigue_estimate: "low",
-      pending_adjustments: []
+    injuries: <数组; 见本文件"几个特殊细节"的 injuries 映射规则>,
+    reminder_mode: <Q9>,
+    reminder_time: <Q9a>,
+    weekly_report_time: <Q10>,
+    readiness: {
+      // 模型预先填好的 4 维度评估（基于无历史数据 → 全 green）
+      overall: "available",
+      dimensions: {
+        physical_readiness: { level: "green", detail: "首次评估，按 baseline 处理" },
+        stress_load: { level: "green", detail: "无历史数据" },
+        recovery_status: { level: "green", detail: "无历史数据" },
+        activity_context: { level: "green", detail: "无历史数据" }
+      },
+      suggestions: ["按 fitness_level 起步训练，几次后再校准"]
     }
   }
 })
 ```
 
-**MCP Server 自动副作用**（不要自己实现这些，也不要手动传这些字段）：
+**Server 自动按序执行**（**模型不需要再调下面任何工具**）：
 
-- **alert_hr 自动算**：检测到 `basic_info.age` 且未设 `max_hr_measured` → 按 `(220 - age)` 做基准，critical = 95%，warning = 90%，自动写回 `profile.alert_hr`。模型**绝不**自己算这俩数字，手动传也会被覆盖。
-- **profile_update 自动写日志**：profile 首次写入时自动 append `profile_update` 事件到 health-log.jsonl。
+1. 防重复：`profile.basic_info.age` 已存在 → 返回 `{ok:true, skipped:true, reason:"already_initialized"}`
+2. `update_state` 写 user_state + profile + training_state（**alert_hr 自动算并写入**；profile_update 事件自动 append 到 health-log）
+3. `schedule_recurring x3` 必建 daily_report / weekly_report / monthly_report
+4. **条件**：`reminder_mode == "scheduled"` 时再 `schedule_recurring(daily_workout_reminder)`，cron 由 `reminder_time HH:MM` 自动拼成 `MM HH * * *`
+5. `get_health_summary` 拉昨晚睡眠/HRV/静息心率（仅供未来用，模型不需要 review）
+6. `show_report({report_type:"readiness_assessment", data: <bulk.readiness>})`
+7. `finish_scene({name:"onboarding", status:"done", summary, daily_log_content})`
 
-## Step 2：创建 cron jobs（必创 3 个 + 条件 1 个）
+**任一步失败**：自动回滚——cancel 已建 cron + 清空 profile/user_state + finish_scene(error)，返回 `{ok:false, failed_step:"<step>", error, rolled_back:true, cron_cancelled:[...]}`。
 
-按下面顺序，**每个都用独立的 `schedule_recurring` 调用**：
+## Step 2：成功后向用户说一句话
 
-```
-schedule_recurring({
-  name: "daily_report",
-  cron: "0 22 * * *",
-  prompt: "请使用 skill:health-claw 生成今日日报"
-})
+`setup_onboarding` 返回成功后，用自然语言对用户说一句简短欢迎 + 解释接下来能用本 skill 做什么（"今晚 22:00 我会发第一份日报""周日 20:00 周报"……）。
 
-schedule_recurring({
-  name: "weekly_report",
-  cron: <由 Q10 字符串转 cron, 默认 "0 20 * * 0">,
-  prompt: "请使用 skill:health-claw 生成本周周报"
-})
+如果 `bulk.reminder_mode == "scheduled"`，补一句"明天 <reminder_time> 我会主动提醒你训练"。
 
-schedule_recurring({
-  name: "monthly_report",
-  cron: "0 20 1 * *",
-  prompt: "请使用 skill:health-claw 生成上月月报"
-})
-```
+**不要劝说**用户改 reminder_mode，**不要评价**用户的 goal。
 
-**条件创建**——仅当 `reminder_mode == "scheduled"` 时：
-
-```
-schedule_recurring({
-  name: "daily_workout_reminder",
-  cron: <由 Q9a HH:MM 转 "MM HH * * *">,
-  prompt: "请使用 skill:health-claw 根据当前状态帮我安排今天的训练"
-})
-```
-
-**Q10 字符串到 cron 的映射**：
+**Q10 字符串到 cron 的映射**（仅供构造 bulk 时参考，server 内部按此规则转换）：
 
 | Q10 选项 | cron |
 |---|---|
 | `Sun 20:00` | `0 20 * * 0` |
 | `Mon 08:00` | `0 8 * * 1` |
 | `Fri 20:00` | `0 20 * * 5` |
-| 其他自定义 `<weekday> HH:MM` | 按相同规则拼接 |
-
-## Step 3：finish_scene 收尾
-
-```
-finish_scene({
-  name: "onboarding",
-  status: "done",
-  summary: "Onboarding 完成. fitness_level=<Q3>, reminder_mode=<Q9>, injuries_count=<Q8 数量>",
-  daily_log_content: "## Onboarding 完成\n\n- 年龄: <age>\n- 体能基础: <fitness_level>\n- 主要目标: <goal>\n- 提醒模式: <reminder_mode>\n- 已创建 cron: <列表>\n"
-})
-// → 内部一次性完成 update_state(last_scene) + write_daily_log + 自动 scene_end 镜像
-```
-
-## Step 4：首次 readiness_assessment
-
-```
-get_health_summary()  // 拉昨晚的睡眠/HRV/静息心率
-```
-
-根据返回数据 + `read_state` 的 profile，组装一份 `readiness_assessment` 报告——4 个维度固定 key：`physical_readiness`（睡眠）/ `stress_load`（HRV）/ `recovery_status`（静息心率）/ `activity_context`（最近 session）。每个维度填 `{level: "green"|"yellow"|"red", detail: "<一句话>"}`，再给 `overall` + `suggestions`。然后：
-
-```
-show_report({
-  report_type: "readiness_assessment",
-  data: { overall, dimensions: {...}, suggestions: [...] }
-})
-```
-
-报告展示后用自然语言对用户说一句简短欢迎 + 解释他接下来能用本 skill 做什么（"今晚 22:00 我会发第一份日报""周日 20:00 周报"……）。**不要劝说**用户改 reminder_mode，**不要评价**用户的 goal。
-
-## Step 5（如果选了 scheduled）：补一句提醒
-
-如果 `reminder_mode == "scheduled"`，告诉用户"明天 <reminder_time> 我会主动提醒你训练，到时你可以点开始/换一个/跳过/过一会儿"。**只说一次**。
 
 ---
 
 ## 失败回滚
 
-因为**前端一次性 bulk submit 所有字段、本场景无用户交互**，失败只能由模型自己检测 + 自己回滚，不能中断去问用户"要不要重试"。
+`setup_onboarding` 自带原子回滚——**模型不需要自己实现**。任一内部步骤失败时 server 自动：
 
-任一步骤失败 → **整体回滚**：
+1. cancel 已建 cron（按创建顺序逆向）
+2. clear profile/user_state
+3. finish_scene(name:"onboarding", status:"error", summary 含 failed_step + 已回滚信息)
 
-1. 把已写入的 cron 全部 `cancel_scheduled` 删掉。
-2. 用 `update_state` 把 profile 改回空 / 删掉 user_state。
-3. `finish_scene({ name: "onboarding", status: "error", summary: "<错误原因>", daily_log_content: "<失败摘要>" })`——一次性完成 last_scene + daily_log + scene_end 镜像。
+返回 `{ok:false, failed_step:"<step>", error, rolled_back:true, cron_cancelled:[<已建被回滚的 name 数组>]}`。
 
-App 前端收到 SSE 错误事件后会让用户重新点"完成"触发一次新的 bulk prompt。**禁止让用户半完成进入主流程**——profile 要么全写要么全空。**模型不要写"请重试"给用户**——交互在前端完成，本场景的职责到 last_scene = error 为止。
+App 前端收到 SSE 错误事件后会让用户重新点"完成"触发一次新的 bulk prompt。**模型不要写"请重试"给用户**——交互在前端完成，本场景的职责到 last_scene = error 为止。
 
 ---
 

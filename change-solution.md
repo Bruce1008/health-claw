@@ -252,13 +252,13 @@
 5. [ ] eval mock: 加 finish_scene/reschedule_recurring 的 mock — **未跟踪在 git repo（在 `health-claw其余文件/eval/`），跳过**
 
 ### Phase 3（Pattern A 复合工具，按风险从低到高）
-1. [ ] `record_rest_day`（最简单，验证设计模式）
-2. [ ] `record_signal` + `record_body_data`
-3. [ ] `change_status`（含 anomaly 7.A 路径）
-4. [ ] `record_session_event`
-5. [ ] `stop_session_with_signal`（含 control_session(stop) handoff）
-6. [ ] `setup_onboarding`（最复杂，原子回滚要测充分）
-7. [ ] 每个工具落地后同步：scene 文档简化 + eval mock 替换
+1. [x] ~~`record_rest_day`（最简单，验证设计模式）~~ **已改**
+2. [x] ~~`record_signal` + `record_body_data`~~ **已改**
+3. [x] ~~`change_status`（含 anomaly 7.A 路径）~~ **已改**
+4. [x] ~~`record_session_event`~~ **已改**
+5. [x] ~~`stop_session_with_signal`（含 control_session(stop) handoff）~~ **已改**
+6. [x] ~~`setup_onboarding`（最复杂，原子回滚要测充分）~~ **已改**
+7. [x] ~~每个工具落地后同步：scene 文档简化 + eval mock 替换~~ **scene 文档已改；eval mock 跳过（在 `health-claw其余文件/eval/`，未跟踪）**
 
 ### Phase 4（Pattern B 复合工具）
 1. [ ] `evaluate_readiness`（不含 injury_check）

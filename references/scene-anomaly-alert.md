@@ -10,16 +10,13 @@
 
 Step 0 分类后，按命中分支声明对应的一份：
 
-> **自动镜像生效**：`update_state(user_state.status 变化)` 自动写 `status_change` 事件、`update_state(signals.body push)` 自动写 `signal` 事件——以下清单**已删去**手动 append_health_log 节点。
+> **Phase 3 复合工具**：2.A 用 `change_status`（同时改 user_state + 通知 + finish_scene）；2.B 用 `record_signal`（signal + 可选通知 + finish_scene）；2.C 仍用 `record_signal`（不传 notification_body 即可）。各分支只 1 个节点。
 
 **2.A 高严重度**（pain_strong / dizziness）：
 
 ```json
 [
-  {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s2_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s3_notify","tool":"send_notification"},
-  {"id":"s4_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_change_status","tool":"change_status"}
 ]
 ```
 
@@ -27,9 +24,7 @@ Step 0 分类后，按命中分支声明对应的一份：
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_notify","tool":"send_notification"},
-  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_record_signal","tool":"record_signal"}
 ]
 ```
 
@@ -37,8 +32,7 @@ Step 0 分类后，按命中分支声明对应的一份：
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_record_signal","tool":"record_signal"}
 ]
 ```
 
@@ -77,20 +71,17 @@ Step 1 去重命中（今日已有同类 signal）/ `active_session != null`（r
 ### 2.A：高严重度（pain_strong / dizziness）
 
 ```
-update_state({
-  patch: {
-    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天>, _reason: <用户原话> },
-    signals: { body: [...<旧条目>, { type: "<pain|dizziness>", detail: <用户原话>, ts: <now>, severity: "high" }] }
-  }
+change_status({
+  to: "<injured|sick>",
+  reason: <用户原话>,
+  scene_name: "anomaly_alert",
+  notification_body: "记录了你说的不适。今天先休息，必要时就医，明天我会再问你状态。"
+  // injuries_patch?: <如已知具体部位，传整数组替换 profile.injuries>
 })
-// → 自动镜像 status_change（_reason 被消费后剥离）+ signal 两个事件
-
-send_notification({
-  title: "建议休息",
-  body: "<一句话, 例: '记录了你说的不适。今天先休息，必要时就医，明天我会再问你状态。'>",
-  target: "phone"
-})
+// 内部：update_state(user_state + 可选 profile.injuries) → 自动镜像 status_change + send_notification + finish_scene
 ```
+
+> 注意：本工具的 `signals.body push` 不强制——若同时想记 signal 条目，再调一次 `record_signal`，但通常 status_change 自身已能复盘。
 
 **不医学诊断。** 不说"你可能是 X 病"。最多说"建议关注 / 必要时就医"。
 
@@ -101,40 +92,42 @@ send_notification({
 不改 user_state，只记信号 + 通知：
 
 ```
-update_state({
-  patch: {
-    signals: { body: [...<旧条目>, { type: "pain", detail: <用户原话>, ts: <now>, severity: "medium" }] }
-  }
+record_signal({
+  signal_type: "pain",
+  detail: <用户原话>,
+  severity: "medium",
+  notification_body: "记下了，如果加重再告诉我。",
+  scene_name: "anomaly_alert"
 })
-// → 自动镜像 signal 事件
-
-send_notification({
-  title: "记录了",
-  body: "<一句话, 例: '记下了，如果加重再告诉我。'>",
-  target: "phone"
-})
+// 内部：update_state(signals.body push) → 自动镜像 signal + send_notification + finish_scene
 ```
 
 ### 2.C：信号堆积（signal_overload）
 
-不发实时通知（避免打扰），把"本周信号偏多，建议安排休息"作为提示**留给下一次 readiness 或 daily_report 场景**附带提一句。本场景只追加 signal 标记：
+不发实时通知（避免打扰），只追加 signal 标记：
 
 ```
-update_state({
-  patch: {
-    signals: { body: [...<旧条目>, { type: "signal_overload", detail: "本周累计 N 条 signal", ts: <now>, severity: "medium" }] }
-  }
+record_signal({
+  signal_type: "signal_overload",
+  detail: "本周累计 N 条 signal",
+  severity: "medium",
+  scene_name: "anomaly_alert"
+  // 不传 notification_body 即不通知
 })
-// → 自动镜像 signal 事件
+// 内部：update_state(signals.body push) → 自动镜像 signal + finish_scene
 ```
+
+> 把"本周信号偏多，建议安排休息"作为提示**留给下一次 readiness 或 daily_report 场景**附带提一句。
 
 ## Step 3：出口
+
+> **复合工具已自带 finish_scene**——2.A/2.B/2.C 三分支都不需要再额外写 finish_scene。本节仅给"用复合工具走不通时"（如 routing 错误、用户表达含糊）的兜底写法：
 
 ```
 finish_scene({
   name: "anomaly_alert",
-  status: "done",
-  summary: "<异常类型>",
+  status: "<blocked|skipped|needs_context>",
+  summary: "<原因>",
   daily_log_content: "## 异常预警\n\n- 类型: <pain_strong|dizziness|pain_mild|signal_overload>\n- 严重度: <high|medium>\n- 处理: <updated_user_state|notify_only|log_only>\n- 用户状态: <user_state.status>\n"
 })
 ```

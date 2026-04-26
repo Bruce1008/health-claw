@@ -9,15 +9,13 @@
 
 `read_state` + 分支分类后声明对应的一份。**三个 stop 分支（1.A 高、1.B、1.C critical）不含 close 节点**——`control_session(stop)` 会清空 pending_nodes，由 post-session 另行声明自己的清单。
 
-> **自动镜像生效**：`update_state(signals.body push)` 自动写 `signal` 事件、`update_state(user_state.status 变化)` 自动写 `status_change` 事件——以下清单**已删去**手动 append_health_log 节点，禁止再补回。
+> **Phase 3 复合工具**：不停训分支用 `record_session_event`；停训分支（含用户主动停）用 `stop_session_with_signal`。各分支 1 个节点。
 
 **1.A 低/中严重度**（疼痛轻，不停训）：
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_notify","tool":"send_notification"},
-  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_record_session_event","tool":"record_session_event"}
 ]
 ```
 
@@ -25,9 +23,7 @@
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_user_state","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s3_stop","tool":"control_session","match":{"action":"stop"}}
+  {"id":"s1_stop_session_with_signal","tool":"stop_session_with_signal"}
 ]
 ```
 
@@ -35,7 +31,7 @@
 
 ```json
 [
-  {"id":"s1_stop","tool":"control_session","match":{"action":"stop"}}
+  {"id":"s1_stop_session_with_signal","tool":"stop_session_with_signal"}
 ]
 ```
 
@@ -43,8 +39,7 @@
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_stop","tool":"control_session","match":{"action":"stop"}}
+  {"id":"s1_stop_session_with_signal","tool":"stop_session_with_signal"}
 ]
 ```
 
@@ -52,9 +47,7 @@
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_notify","tool":"send_notification"},
-  {"id":"s3_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_record_session_event","tool":"record_session_event"}
 ]
 ```
 
@@ -81,51 +74,51 @@ Step 0 命中 blocked（`active_session == null`）时直接调 `finish_scene({s
 ### 1.A：用户主动反馈疼痛/受伤（对话中捕获）
 
 1. **不医学诊断**。一次性问清楚"哪个部位、什么感觉"，**不追问细节**。
-2. 把信号写入 state + health-log（`signals.body` 是数组，**先 read_state 取出现有数组再 push 再完整写回**）：
-
-```
-update_state({
-  patch: {
-    signals: {
-      body: [...<旧条目>, { type: "pain", detail: <用户原话>, ts: <now>, severity: "<low|medium|high>" }]
-    }
-  }
-})
-// → 自动镜像 signal 事件到 health-log，不要再手动 append_health_log
-```
-
-3. 按严重度决定下一步：
+2. 按严重度选复合工具（**1 次调用走完**）：
 
 **低/中**（"小痛"、"有点疼"、"怪怪的"、"不太对劲"）：不停训。
 
 ```
-send_notification({ target: "watch", body: "记录了，建议降低强度。要继续吗？" })
+record_session_event({
+  signal_type: "pain",
+  detail: <用户原话>,
+  severity: "<low|medium>",
+  notification_body: "记录了，建议降低强度。要继续吗？"
+})
+// 内部：update_state(signals.body push) → 自动镜像 signal + send_notification(watch) + finish_scene(during_session/done)
 ```
-
-出口调 `finish_scene({ name: "during_session", status: "done", summary: "pain_mild 已记录" })`。
 
 **高**（"很痛"、"剧痛"、"拉伤了"、"动不了"、"头晕"、"想吐"、"站不稳"）：
 
 ```
-update_state({
-  patch: {
-    user_state: { status: "<injured|sick>", since: <today>, next_check: <today + 1 天>, _reason: <用户原话> }
+stop_session_with_signal({
+  trigger: "pain",          // 或 "dizziness"
+  detail: <用户原话>,
+  severity: "high",
+  status_change: {
+    to: "<injured|sick>",
+    reason: <用户原话>
+    // since/next_check 不传则默认今天 / 今天+1
   }
 })
-// → 自动镜像 status_change 事件（_reason 字段被消费后自动剥离，不会落入 state）
-
-control_session({ action: "stop" })
+// 内部：update_state(signals + user_state with _reason) → 自动镜像 signal + status_change
+//      + control_session(stop)（清 active_session + 清 pending_nodes）
 ```
 
-→ stop 返回后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "partial"`；`analysis` 开头写"本次因用户反馈强烈不适中止"）。本分支**不写自己的 last_scene**，由 post-session 出口统一写。
+→ stop 后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "partial"`；`analysis` 开头写"本次因用户反馈强烈不适中止"）。本分支**不写自己的 last_scene**，由 post-session 出口统一写。
 
 ### 1.B：用户在 Watch 上点"结束训练"
 
 ```
-control_session({ action: "stop" })
+stop_session_with_signal({
+  trigger: "user_stop",
+  detail: "用户在 Watch 上点结束",
+  severity: "low"
+})
+// 内部：update_state(signals.body 标记 user_stop) → 自动镜像 signal + control_session(stop)
 ```
 
-→ stop 返回后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "full"`，正常结束）。本分支**不写自己的 last_scene** / **不写 daily_log** / **不更新 recent_sessions**——全部由 post-session 出口统一处理。
+→ stop 后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "full"`，正常结束）。本分支**不写自己的 last_scene** / **不写 daily_log** / **不更新 recent_sessions**——全部由 post-session 出口统一处理。
 
 ### 1.C：心率告警事件（Watch 已本地震动 + 持续超阈值后上报）
 
@@ -137,32 +130,29 @@ control_session({ action: "stop" })
 **`critical` 级别：**
 
 ```
-update_state({
-  patch: {
-    signals: { body: [...<旧条目>, { type: "hr_critical", detail: "心率超过 critical 持续 10 秒+", ts: <now>, severity: "high" }] }
-  }
+stop_session_with_signal({
+  trigger: "hr_critical",
+  detail: "心率超过 critical 持续 10 秒+",
+  severity: "high"
 })
-// → 自动镜像 signal 事件
-
-control_session({ action: "stop" })
+// 内部：update_state(signals.body push hr_critical) → 自动镜像 signal + control_session(stop)
 ```
 
-→ stop 返回后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "partial"`；`analysis` 开头写"本次因心率 critical 持续 10 秒+ 中止，实际训练 X 分钟"）。本分支**不写自己的 last_scene**，由 post-session 出口统一写。
+→ stop 后按 SKILL.md §3 特例规则，**同一 turn 内**直接执行 scene-post-session.md 全部步骤（`completion: "partial"`；`analysis` 开头写"本次因心率 critical 持续 10 秒+ 中止，实际训练 X 分钟"）。本分支**不写自己的 last_scene**，由 post-session 出口统一写。
 
 **`warning` 级别：**
 
 ```
-update_state({
-  patch: {
-    signals: { body: [...<旧条目>, { type: "hr_warning", detail: "心率偏高持续 30 秒", ts: <now>, severity: "medium" }] }
-  }
+record_session_event({
+  signal_type: "hr_warning",
+  detail: "心率偏高持续 30 秒",
+  severity: "medium",
+  notification_body: "心率偏高，注意节奏"
 })
-// → 自动镜像 signal 事件
-
-send_notification({ target: "watch", body: "心率偏高，注意节奏" })
+// 内部：update_state(signals.body push hr_warning) → 自动镜像 signal + send_notification(watch) + finish_scene(during_session/done)
 ```
 
-不强制停训，继续等后续事件。出口调 `finish_scene({ name: "during_session", status: "done", summary: "hr_warning 已记录" })`。
+不强制停训，继续等后续事件。
 
 ## Step 2：关于"换一个 plan"的边界
 

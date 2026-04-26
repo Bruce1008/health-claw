@@ -16,32 +16,29 @@
 ]
 ```
 
-> **自动镜像生效**：以下 §2/§3/§4 的 `update_state(signals.body push)` / `update_state(training_state.consecutive_rest_days)` / `update_state(user_state.status 变化)` 自动写对应 health-log 事件，**已删去手动 append_health_log 节点**。
+> **Phase 3 复合工具**：§2/§3/§4 各自全部步骤已合并到一个工具，pending_nodes 清单只剩 1 个节点。手动 update_state + finish_scene 仍然可用（fallback），但**首选复合工具**。
 
-**§2 signal_capture_chat**：
+**§2 signal_capture_chat**（用 `record_body_data` 复合工具）：
 
 ```json
 [
-  {"id":"s1_signal_state","tool":"update_state","match":{"patch":"signals"}},
-  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_record_body_data","tool":"record_body_data"}
 ]
 ```
 
-**§3 rest_day**：
+**§3 rest_day**（用 `record_rest_day` 复合工具）：
 
 ```json
 [
-  {"id":"s1_training_state","tool":"update_state","match":{"patch":"training_state"}},
-  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_record_rest_day","tool":"record_rest_day"}
 ]
 ```
 
-**§4 status_change**：
+**§4 status_change**（用 `change_status` 复合工具）：
 
 ```json
 [
-  {"id":"s1_user_state","tool":"update_state","match":{"patch":"user_state"}},
-  {"id":"s2_finish","tool":"finish_scene","match":{"status":"done"}}
+  {"id":"s1_change_status","tool":"change_status"}
 ]
 ```
 
@@ -53,7 +50,7 @@
 ]
 ```
 
-- status_change 若涉及受伤，同时在 s2 之前增加一节点 `{"id":"s1b_profile_injuries","tool":"update_state","match":{"patch":"profile"}}`（追加 `profile.injuries`）。
+- status_change 若涉及受伤：用 `change_status({to:"injured", reason, injuries_patch:[<整数组>]})` 一次完成，**不需要**额外节点。
 - user_correction 若需下发新计划，插入 `{"id":"s0a_set_workout_plan","tool":"set_workout_plan"}` + `{"id":"s0b_show_report","tool":"show_report","match":{"report_type":"training_plan"}}` 到 s1 之前。
 
 ---
@@ -85,10 +82,9 @@ read_state
 
 ```
 read_state
-→ update_state({patch:{signals:{body:[...<旧条目>, {type:"<weight|body_fat|...>", detail:"<value><unit>", ts:<now>}]}}})
-   // → 自动镜像 signal 事件到 health-log
-→ update_state({patch:{profile:{basic_info:{weight_kg:...}}}}) // 仅当确实需要长期更新 profile 时
-→ finish_scene({name:"signal_capture_chat", status:"done", summary:"记录 <signal_type>=<value>", daily_log_content:"## 信号采集\n- <signal_type>: <value><unit>"})
+→ record_body_data({weight_kg?, body_fat_pct?, muscle_mass_kg?, waist_cm?, resting_hr?, update_profile?})
+   // 内部：append_health_log(body_data) + 可选 update_state(profile.basic_info) + finish_scene 一气呵成
+   // update_profile=true 时把 weight_kg/body_fat_pct 同步进 profile.basic_info 作为长期值
 ```
 
 判断是否更新 profile：一次性"今天称了 73.5"不更新 profile；用户明确说"我的体重是 74"或连续多次上报稳定值时更新。
@@ -103,12 +99,8 @@ read_state
 
 ```
 read_state
-→ update_state({patch:{training_state:{
-    consecutive_rest_days: <before+1>,
-    consecutive_training_days: 0
-  }}})
-   // → consecutive_rest_days N→N+1 自动镜像 rest_day 事件到 health-log
-→ finish_scene({name:"rest_day", status:"done", summary:"主动休息，连续休息 <n> 天", daily_log_content:"## 休息日\n- 主动选择休息"})
+→ record_rest_day({reason?})
+   // 内部：update_state(consecutive_rest_days+1, consecutive_training_days:0) → 自动镜像 rest_day + finish_scene
 ```
 
 硬规则：
@@ -129,15 +121,15 @@ read_state
 
 ```
 read_state
-→ update_state({patch:{user_state:{status:"<after>", since:"<stage_date>", _reason:"<用户描述>"}}})
-   // → 自动镜像 status_change 事件（_reason 被消费后剥离，不写入 state）
-→ finish_scene({name:"status_change", status:"done", summary:"<before> → <after>", daily_log_content:"## 状态变更\n- <before> → <after>\n- 说明: <reason>"})
+→ change_status({to:"<after>", reason:"<用户描述>", since?, next_check?, injuries_patch?, notification_body?})
+   // 内部：update_state(user_state + 可选 profile.injuries) → 自动镜像 status_change + 可选 send_notification + finish_scene
+   // 受伤 / 生病自动设 next_check=今天+1天
 ```
 
 如果是"受伤"：
 
-- 同时走 `profile.injuries` 增补（整数组替换）一条新 injury，字段参考 `references/state-schema.md`。
-- `last_scene.summary` 带上受伤部位。
+- 直接通过 `change_status` 的 `injuries_patch` 字段一次性整数组替换，字段参考 `references/state-schema.md`。
+- 高严重度建议同时传 `notification_body` 让 server 自动发手机通知。
 
 ---
 

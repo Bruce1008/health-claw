@@ -777,6 +777,149 @@ const TOOLS = [
       required: ["name"],
       additionalProperties: false
     }
+  },
+
+  // ── Pattern A 复合工具（Phase 3）：场景全内化，1 次调用走完一个场景 ──
+  {
+    name: "record_rest_day",
+    description: "**复合工具**：lightweight rest_day 场景全内化。内部：update_state(consecutive_rest_days+1, consecutive_training_days:0)（自动镜像 rest_day 事件）+ finish_scene。模型 1 次调用。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "可选的休息原因（写入 daily log）" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "record_signal",
+    description: "**复合工具**：记录主观症状信号（疼痛/头晕/不适），用于 anomaly 2.B 中严重度、lightweight signal 类。内部：update_state(signals.body push)（自动镜像 signal 事件）+ 可选 send_notification + finish_scene。**主观症状用本工具；可量化身体指标用 record_body_data**。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        signal_type: { type: "string", description: "信号类型，如 pain / dizziness / fatigue 等" },
+        detail: { type: "string", description: "用户原话或简短描述" },
+        severity: { type: "string", enum: ["low", "medium", "high"], description: "严重度" },
+        notification_body: { type: "string", description: "可选；非空时同时 send_notification 到 phone" },
+        scene_name: { type: "string", description: "出口 last_scene.name，缺省 anomaly_alert" }
+      },
+      required: ["signal_type", "detail", "severity"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "record_body_data",
+    description: "**复合工具**：记录可量化身体指标（体重/体脂/肌肉量/腰围/静息心率），用于 lightweight signal_capture_chat。内部：append_health_log(body_data) + 可选 update_state(profile.basic_info)（仅 update_profile:true 时）+ finish_scene。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        weight_kg: { type: "number" },
+        body_fat_pct: { type: "number" },
+        muscle_mass_kg: { type: "number" },
+        waist_cm: { type: "number" },
+        resting_hr: { type: "number" },
+        update_profile: { type: "boolean", description: "true 时同时把 weight_kg/body_fat_pct 写回 profile.basic_info（长期值）；缺省 false 只记一次性数据" },
+        scene_name: { type: "string", description: "缺省 signal_capture_chat" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "change_status",
+    description: "**复合工具**：状态变化（lightweight status_change + anomaly 2.A 高严重度）。内部：update_state(user_state.status + _reason)（自动镜像 status_change）+ 可选 update_state(profile.injuries 整数组替换) + 可选 send_notification + finish_scene。**禁止手动 append_health_log(status_change)**——已自动镜像。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", enum: USER_STATE_STATUS_ENUM, description: "新 user_state.status" },
+        reason: { type: "string", description: "变化原因（用户原话），由 server 写入 _reason 透传镜像后剥离" },
+        since: { type: "string", description: "YYYY-MM-DD，缺省今天" },
+        next_check: { type: "string", description: "YYYY-MM-DD 下次复查日期，缺省 +1 天（仅 sick/injured）" },
+        injuries_patch: {
+          type: "array",
+          description: "整数组替换 profile.injuries；不传则不动",
+          items: { type: "object" }
+        },
+        notification_body: { type: "string", description: "可选；非空时 send_notification 到 phone（高严重度建议传）" },
+        scene_name: { type: "string", description: "缺省 status_change；anomaly 路径传 anomaly_alert" }
+      },
+      required: ["to", "reason"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "record_session_event",
+    description: "**复合工具**：训练中非停训信号（during-session 1.A 低/中、1.C warning）。内部：update_state(signals.body push)（自动镜像 signal）+ 可选 send_notification(target:watch) + finish_scene(during_session)。**只用于不停训分支**——停训分支用 stop_session_with_signal。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        signal_type: { type: "string", description: "如 pain / hr_warning" },
+        detail: { type: "string" },
+        severity: { type: "string", enum: ["low", "medium", "high"] },
+        notification_body: { type: "string", description: "可选；非空时 send_notification(target:watch)" }
+      },
+      required: ["signal_type", "detail", "severity"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "stop_session_with_signal",
+    description: "**复合工具**：训练中停训分支（during-session 1.A 高、1.B 用户停、1.C critical）。内部：update_state(signals.body push + 可选 user_state with _reason)（自动镜像 signal + 可选 status_change）+ control_session(stop)（清 active_session + 清 pending_nodes）。**stop 后由 SKILL.md §3 特例规则自动 handoff 给 scene-post-session**——本工具不调 finish_scene。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        trigger: { type: "string", enum: ["pain", "hr_critical", "user_stop", "dizziness"], description: "停训触发源" },
+        detail: { type: "string", description: "信号详情；user_stop 可传 '用户在 Watch 上点结束'" },
+        severity: { type: "string", enum: ["low", "medium", "high"], description: "user_stop 可传 low" },
+        status_change: {
+          type: "object",
+          description: "可选；当用户疼痛/头晕导致状态变化时一并写",
+          properties: {
+            to: { type: "string", enum: USER_STATE_STATUS_ENUM },
+            reason: { type: "string" },
+            since: { type: "string" },
+            next_check: { type: "string" }
+          },
+          required: ["to", "reason"]
+        }
+      },
+      required: ["trigger", "detail", "severity"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "setup_onboarding",
+    description: "**复合工具**：onboarding 全内化。内部：防重复检查 → update_state(profile/user_state/training_state) → schedule_recurring x3-4（按 reminder_mode 决定是否建 daily_workout_reminder）→ get_health_summary → show_report(readiness_assessment) → finish_scene(onboarding/done)。**任一步失败原子回滚**：cancel 已建 cron + 清空 profile/user_state + finish_scene(error)。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bulk: {
+          type: "object",
+          description: "Onboarding bulk payload（前端一次性收齐）",
+          properties: {
+            basic_info: { type: "object", description: "{age, gender, height_cm?, weight_kg?}" },
+            fitness_level: { type: "string", enum: FITNESS_LEVEL_ENUM },
+            goal: { type: "string" },
+            preferences: { type: "object" },
+            injuries: { type: "array", items: { type: "object" } },
+            reminder_mode: { type: "string", enum: ["scheduled", "proactive"] },
+            reminder_time: { type: "string", description: "HH:MM；reminder_mode=scheduled 时必填" },
+            weekly_report_time: { type: "string", description: "如 'Sun 20:00'，缺省 'Sun 20:00'" },
+            readiness: {
+              type: "object",
+              description: "模型预先填好的 readiness 报告 data（4 维度+overall+suggestions）；server 拉 health_summary 后由模型 review，再传入；缺省 server 用占位 'available' 报告兜底",
+              properties: {
+                overall: { type: "string" },
+                dimensions: { type: "object" },
+                suggestions: { type: "array", items: { type: "string" } }
+              }
+            }
+          },
+          required: ["basic_info", "fitness_level"]
+        }
+      },
+      required: ["bulk"],
+      additionalProperties: false
+    }
   }
 ];
 
@@ -1341,6 +1484,381 @@ handlers.cancel_scheduled = (args) => {
     });
   });
 };
+
+// ─── Pattern A 复合工具 handlers (Phase 3) ─────────────────────────────
+// 设计原则：内部复用既有 handler（拿到自动镜像 / 枚举校验 / scene_end 等所有副作用）；
+// 任一步失败立即返回 {ok:false, failed_step, rolled_back?}，让模型能定位。
+
+// 小工具：把复合返回值收敛
+function composeFail(step, detail, rolledBack) {
+  return { ok: false, failed_step: step, error: detail && detail.error ? detail.error : (typeof detail === "string" ? detail : "step_failed"), detail, rolled_back: !!rolledBack };
+}
+
+// #c1 record_rest_day —— lightweight rest_day 全内化
+handlers.record_rest_day = async (args) => {
+  const cur = readState();
+  const oldRestDays = (cur.training_state && cur.training_state.consecutive_rest_days) || 0;
+  const newRestDays = oldRestDays + 1;
+
+  // 1. update_state（自动镜像 rest_day 事件）
+  const upd = handlers.update_state({
+    patch: {
+      training_state: {
+        consecutive_rest_days: newRestDays,
+        consecutive_training_days: 0
+      }
+    }
+  });
+  if (!upd.ok) return composeFail("update_state", upd, false);
+
+  // 2. finish_scene
+  const summary = `主动休息，连续休息 ${newRestDays} 天${args && args.reason ? `（${args.reason}）` : ""}`;
+  const fin = handlers.finish_scene({
+    name: "rest_day",
+    status: "done",
+    summary,
+    daily_log_content: `## 休息日\n\n- 主动选择休息\n${args && args.reason ? `- 原因: ${args.reason}\n` : ""}`
+  });
+  if (!fin.ok) return composeFail("finish_scene", fin, false);
+
+  return { ok: true, consecutive_rest_days: newRestDays, log_file: fin.log_file };
+};
+
+// #c2 record_signal —— 主观症状（anomaly 2.B / lightweight 主观信号）
+handlers.record_signal = async (args) => {
+  const sceneName = (args && args.scene_name) || "anomaly_alert";
+  const cur = readState();
+  const oldBody = (cur.signals && Array.isArray(cur.signals.body)) ? cur.signals.body : [];
+
+  const upd = handlers.update_state({
+    patch: {
+      signals: {
+        body: [...oldBody, { type: args.signal_type, detail: args.detail, ts: nowISO(), severity: args.severity }]
+      }
+    }
+  });
+  if (!upd.ok) return composeFail("update_state", upd, false);
+
+  let notificationSent = false;
+  if (args.notification_body) {
+    const notif = handlers.send_notification({ body: args.notification_body, target: "phone" });
+    if (!notif.ok) return composeFail("send_notification", notif, false);
+    notificationSent = true;
+  }
+
+  const fin = handlers.finish_scene({
+    name: sceneName,
+    status: "done",
+    summary: `${args.signal_type} 已记录 (${args.severity})`,
+    daily_log_content: `## ${sceneName === "anomaly_alert" ? "异常预警" : "信号记录"}\n\n- 类型: ${args.signal_type}\n- 严重度: ${args.severity}\n- 详情: ${args.detail}\n`
+  });
+  if (!fin.ok) return composeFail("finish_scene", fin, false);
+
+  return { ok: true, signal_logged: true, notification_sent: notificationSent, log_file: fin.log_file };
+};
+
+// #c3 record_body_data —— 可量化身体指标（lightweight signal_capture_chat）
+handlers.record_body_data = async (args) => {
+  const sceneName = (args && args.scene_name) || "signal_capture_chat";
+  const data = {};
+  if (args.weight_kg !== undefined) data.weight_kg = args.weight_kg;
+  if (args.body_fat_pct !== undefined) data.body_fat_pct = args.body_fat_pct;
+  if (args.muscle_mass_kg !== undefined) data.muscle_mass_kg = args.muscle_mass_kg;
+  if (args.waist_cm !== undefined) data.waist_cm = args.waist_cm;
+  if (args.resting_hr !== undefined) data.resting_hr = args.resting_hr;
+  if (Object.keys(data).length === 0) {
+    return { ok: false, error: "至少传一个测量字段" };
+  }
+
+  // 1. append body_data 事件（body_data 不在 auto-mirror 集，需手动 append）
+  const evRes = handlers.append_health_log({
+    event: { type: "body_data", date: today(), ts: nowISO(), data, source: "user_input" }
+  });
+  if (!evRes.ok) return composeFail("append_health_log", evRes, false);
+
+  // 2. 可选写回 profile.basic_info（仅长期值才传 update_profile:true）
+  if (args.update_profile === true) {
+    const basicPatch = {};
+    if (data.weight_kg !== undefined) basicPatch.weight_kg = data.weight_kg;
+    if (data.body_fat_pct !== undefined) basicPatch.body_fat_pct = data.body_fat_pct;
+    if (Object.keys(basicPatch).length > 0) {
+      const upd = handlers.update_state({ patch: { profile: { basic_info: basicPatch } } });
+      if (!upd.ok) return composeFail("update_state", upd, false);
+    }
+  }
+
+  // 3. finish_scene
+  const summaryParts = Object.entries(data).map(([k, v]) => `${k}=${v}`);
+  const fin = handlers.finish_scene({
+    name: sceneName,
+    status: "done",
+    summary: `记录 ${summaryParts.join(", ")}`,
+    daily_log_content: `## 信号采集\n\n${summaryParts.map(s => `- ${s}`).join("\n")}\n`
+  });
+  if (!fin.ok) return composeFail("finish_scene", fin, false);
+
+  return { ok: true, recorded: data, profile_updated: args.update_profile === true, log_file: fin.log_file };
+};
+
+// #c4 change_status —— lightweight status_change + anomaly 2.A 高严重度
+handlers.change_status = async (args) => {
+  const sceneName = (args && args.scene_name) || "status_change";
+  const cur = readState();
+  const fromStatus = (cur.user_state && cur.user_state.status) || "available";
+
+  const userStatePatch = {
+    status: args.to,
+    since: args.since || today(),
+    _reason: args.reason  // 自动镜像 status_change 后被剥离
+  };
+  if (args.next_check) {
+    userStatePatch.next_check = args.next_check;
+  } else if (args.to === "sick" || args.to === "injured") {
+    // 默认 +1 天复查
+    const d = new Date(today());
+    d.setDate(d.getDate() + 1);
+    userStatePatch.next_check = d.toISOString().slice(0, 10);
+  }
+
+  const patch = { user_state: userStatePatch };
+  if (Array.isArray(args.injuries_patch)) {
+    patch.profile = { injuries: args.injuries_patch };
+  }
+
+  const upd = handlers.update_state({ patch });
+  if (!upd.ok) return composeFail("update_state", upd, false);
+
+  let notificationSent = false;
+  if (args.notification_body) {
+    const notif = handlers.send_notification({ body: args.notification_body, target: "phone" });
+    if (!notif.ok) return composeFail("send_notification", notif, false);
+    notificationSent = true;
+  }
+
+  const fin = handlers.finish_scene({
+    name: sceneName,
+    status: "done",
+    summary: `${fromStatus} → ${args.to}`,
+    daily_log_content: `## 状态变更\n\n- ${fromStatus} → ${args.to}\n- 说明: ${args.reason}\n`
+  });
+  if (!fin.ok) return composeFail("finish_scene", fin, false);
+
+  return { ok: true, from: fromStatus, to: args.to, notification_sent: notificationSent, log_file: fin.log_file };
+};
+
+// #c5 record_session_event —— during-session 1.A 低/中、1.C warning（不停训）
+handlers.record_session_event = async (args) => {
+  const cur = readState();
+  if (!cur.active_session) {
+    return { ok: false, error: "no_active_session", hint: "无进行中 session，本工具仅用于 during-session" };
+  }
+  const oldBody = (cur.signals && Array.isArray(cur.signals.body)) ? cur.signals.body : [];
+
+  const upd = handlers.update_state({
+    patch: {
+      signals: {
+        body: [...oldBody, { type: args.signal_type, detail: args.detail, ts: nowISO(), severity: args.severity }]
+      }
+    }
+  });
+  if (!upd.ok) return composeFail("update_state", upd, false);
+
+  let notificationSent = false;
+  if (args.notification_body) {
+    const notif = handlers.send_notification({ body: args.notification_body, target: "watch" });
+    if (!notif.ok) return composeFail("send_notification", notif, false);
+    notificationSent = true;
+  }
+
+  const fin = handlers.finish_scene({
+    name: "during_session",
+    status: "done",
+    summary: `${args.signal_type} 已记录`,
+    daily_log_content: `## 训练中信号\n\n- 类型: ${args.signal_type}\n- 严重度: ${args.severity}\n- 详情: ${args.detail}\n`
+  });
+  if (!fin.ok) return composeFail("finish_scene", fin, false);
+
+  return { ok: true, signal_logged: true, notification_sent: notificationSent, log_file: fin.log_file };
+};
+
+// #c6 stop_session_with_signal —— during-session 停训分支（1.A 高/1.B/1.C critical）
+// 不调 finish_scene；control_session(stop) 后由 SKILL.md §3 特例规则 handoff 给 scene-post-session。
+handlers.stop_session_with_signal = async (args) => {
+  const cur = readState();
+  if (!cur.active_session) {
+    return { ok: false, error: "no_active_session", hint: "无 session 在进行，无可停" };
+  }
+  const oldBody = (cur.signals && Array.isArray(cur.signals.body)) ? cur.signals.body : [];
+
+  // 组装 patch：signals 必有，user_state 可选
+  const patch = {
+    signals: {
+      body: [...oldBody, { type: args.trigger, detail: args.detail, ts: nowISO(), severity: args.severity }]
+    }
+  };
+  if (args.status_change) {
+    const sc = args.status_change;
+    const userStatePatch = { status: sc.to, since: sc.since || today(), _reason: sc.reason };
+    if (sc.next_check) {
+      userStatePatch.next_check = sc.next_check;
+    } else if (sc.to === "sick" || sc.to === "injured") {
+      const d = new Date(today()); d.setDate(d.getDate() + 1);
+      userStatePatch.next_check = d.toISOString().slice(0, 10);
+    }
+    patch.user_state = userStatePatch;
+  }
+
+  const upd = handlers.update_state({ patch });
+  if (!upd.ok) return composeFail("update_state", upd, false);
+
+  // 拿 last_session 数据（在 stop 之前快照）
+  const liveBefore = handlers.get_session_live({});
+
+  // control_session(stop) —— 自动清 active_session + 清 pending_nodes
+  const stopRes = handlers.control_session({ action: "stop" });
+  if (!stopRes.ok) return composeFail("control_session", stopRes, false);
+
+  return {
+    ok: true,
+    session_stopped: true,
+    trigger: args.trigger,
+    last_session_data: liveBefore && liveBefore.ok ? liveBefore : null,
+    handoff_to: "scene-post-session.md",
+    note: "本 turn 内立即加载执行 scene-post-session.md（pending_nodes 已被 control_session(stop) 清空）"
+  };
+};
+
+// #c7 setup_onboarding —— onboarding 全内化（含原子回滚）
+handlers.setup_onboarding = async (args) => {
+  const bulk = (args && args.bulk) || {};
+  const createdCron = [];
+
+  // 0. 防重复：profile.basic_info.age 已存在 → 直接返回
+  const cur = readState();
+  if (cur.profile && cur.profile.basic_info && cur.profile.basic_info.age) {
+    const fin = handlers.finish_scene({
+      name: "onboarding",
+      status: "skipped",
+      summary: "已初始化过",
+      daily_log_content: "## Onboarding\n\n- 状态: 已初始化过，跳过\n"
+    });
+    return { ok: true, skipped: true, reason: "already_initialized", log_file: fin.log_file };
+  }
+
+  // 校验必填
+  if (!bulk.basic_info || bulk.basic_info.age === undefined) {
+    return { ok: false, error: "bulk.basic_info.age 必填" };
+  }
+  if (!bulk.fitness_level) {
+    return { ok: false, error: "bulk.fitness_level 必填" };
+  }
+
+  // 内部回滚函数：取消已建 cron + 清空 profile/user_state + finish_scene(error)
+  async function rollback(failedStep, detail) {
+    for (const name of createdCron) {
+      try { await handlers.cancel_scheduled({ name }); } catch (_) {}
+    }
+    handlers.update_state({
+      patch: { profile: null, user_state: { status: "available", since: today(), next_check: null } }
+    });
+    handlers.finish_scene({
+      name: "onboarding",
+      status: "error",
+      summary: `failed_step=${failedStep}: ${typeof detail === "string" ? detail : JSON.stringify(detail).slice(0, 200)}`,
+      daily_log_content: `## Onboarding 失败\n\n- 失败步骤: ${failedStep}\n- 已回滚: cron x${createdCron.length}, profile清空\n`
+    });
+    return { ok: false, failed_step: failedStep, error: typeof detail === "string" ? detail : (detail && detail.error) || "step_failed", detail, rolled_back: true, cron_cancelled: createdCron.slice() };
+  }
+
+  // 1. 写 profile + user_state + training_state
+  const profilePatch = {
+    basic_info: bulk.basic_info,
+    goal: bulk.goal || "保持健康、规律运动",
+    preferences: bulk.preferences || {},
+    fitness_level: bulk.fitness_level,
+    injuries: Array.isArray(bulk.injuries) ? bulk.injuries : [],
+    max_hr_measured: null
+  };
+  const upd = handlers.update_state({
+    patch: {
+      user_state: { status: "available", since: today(), next_check: null },
+      profile: profilePatch,
+      training_state: {
+        consecutive_training_days: 0,
+        consecutive_rest_days: 0,
+        recent_sessions: [],
+        fatigue_estimate: "low",
+        pending_adjustments: []
+      }
+    }
+  });
+  if (!upd.ok) return rollback("update_state", upd);
+
+  // 2. cron x3 必建
+  const cronJobs = [
+    { name: "daily_report", cron: "0 22 * * *", prompt: "请使用 skill:health-claw 生成今日日报" },
+    { name: "weekly_report", cron: weeklyTimeToCron(bulk.weekly_report_time || "Sun 20:00"), prompt: "请使用 skill:health-claw 生成本周周报" },
+    { name: "monthly_report", cron: "0 20 1 * *", prompt: "请使用 skill:health-claw 生成上月月报" }
+  ];
+  // 3. 条件建 daily_workout_reminder
+  if (bulk.reminder_mode === "scheduled" && bulk.reminder_time) {
+    const [hh, mm] = bulk.reminder_time.split(":").map(s => parseInt(s, 10));
+    if (!Number.isNaN(hh) && !Number.isNaN(mm)) {
+      cronJobs.push({
+        name: "daily_workout_reminder",
+        cron: `${mm} ${hh} * * *`,
+        prompt: "请使用 skill:health-claw 根据当前状态帮我安排今天的训练"
+      });
+    }
+  }
+  for (const job of cronJobs) {
+    const r = await handlers.schedule_recurring(job);
+    if (!r.ok) return rollback("schedule_recurring", { job, error: r.error });
+    createdCron.push(job.name);
+  }
+
+  // 4. get_health_summary
+  const hs = handlers.get_health_summary({});
+  if (!hs.ok) return rollback("get_health_summary", hs);
+
+  // 5. show_report(readiness_assessment)
+  const readinessData = bulk.readiness || {
+    overall: "available",
+    dimensions: {
+      physical_readiness: { level: "green", detail: "首次评估，按 baseline 处理" },
+      stress_load: { level: "green", detail: "无历史数据" },
+      recovery_status: { level: "green", detail: "无历史数据" },
+      activity_context: { level: "green", detail: "无历史数据" }
+    },
+    suggestions: ["按 fitness_level 起步训练，几次后再校准"]
+  };
+  const sr = handlers.show_report({ report_type: "readiness_assessment", data: readinessData });
+  if (!sr.ok) return rollback("show_report", sr);
+
+  // 6. finish_scene(done)
+  const fin = handlers.finish_scene({
+    name: "onboarding",
+    status: "done",
+    summary: `Onboarding 完成. fitness_level=${bulk.fitness_level}, reminder_mode=${bulk.reminder_mode || "proactive"}, injuries=${profilePatch.injuries.length}`,
+    daily_log_content: `## Onboarding 完成\n\n- 年龄: ${bulk.basic_info.age}\n- 体能基础: ${bulk.fitness_level}\n- 主要目标: ${profilePatch.goal}\n- 提醒模式: ${bulk.reminder_mode || "proactive"}\n- 已创建 cron: ${createdCron.join(", ")}\n`
+  });
+  if (!fin.ok) return rollback("finish_scene", fin);
+
+  return {
+    ok: true,
+    cron_created: createdCron,
+    readiness_overall: readinessData.overall,
+    log_file: fin.log_file
+  };
+};
+
+// 辅助：weekly time → cron
+function weeklyTimeToCron(s) {
+  const m = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(\d{1,2}):(\d{2})$/.exec((s || "").trim());
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  if (!m) return "0 20 * * 0";
+  return `${parseInt(m[3], 10)} ${parseInt(m[2], 10)} * * ${wd[m[1]]}`;
+}
 
 // ─── MCP stdio 主循环 (NDJSON) ─────────────────────────────────────────────
 function log(...args) { process.stderr.write(`[health-claw-mcp] ${args.join(" ")}\n`); }
